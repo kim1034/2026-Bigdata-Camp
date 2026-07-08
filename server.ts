@@ -68,6 +68,63 @@ function normalizePlaceResult(raw: any, fallbackText: string, provider: string):
   };
 }
 
+function safeJsonParse(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function generateItineraryWithGemini(payload: any) {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY가 설정되어 있지 않습니다.');
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+  const model = process.env.GEMINI_MODEL || process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash';
+  const places = Array.isArray(payload?.places) ? payload.places : [];
+  const basePlace = payload?.basePlace || null;
+  const visitDate = String(payload?.visitDate || '');
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        text: [
+          '너는 한국 여행 일정표를 만드는 모바일 앱의 AI 플래너야.',
+          '기준점에서 가까운 순서로 정렬된 장소 목록을 바탕으로 하루 일정표를 만들어줘.',
+          '반드시 JSON만 반환해. 마크다운 코드블록은 쓰지 마.',
+          'JSON 필드: title, summary, steps',
+          'steps는 배열이고 각 항목 필드: time, placeName, category, activity, duration, hoursStatus, tip, moveToNext',
+          'moveToNext는 마지막 장소면 빈 문자열, 아니면 "🚶 도보 이동 7분 (547m)" 같은 형식으로 써.',
+          '영업시간 정보가 부족하면 "영업시간 확인 필요"라고 명확히 써.',
+          `방문 예정일: ${visitDate}`,
+          `기준점: ${basePlace ? JSON.stringify(basePlace) : '사용자 입력 기준점'}`,
+          `장소 목록: ${JSON.stringify(places)}`,
+        ].join('\n'),
+      },
+    ],
+    config: {
+      responseMimeType: 'application/json',
+    },
+  });
+
+  const parsed = safeJsonParse(response.text || '');
+  if (!parsed) {
+    throw new Error('Gemini 일정표 응답을 해석하지 못했습니다.');
+  }
+
+  return parsed;
+}
+
 function inferMockPlace(text: string): PlaceResult {
   const value = text.toLowerCase();
 
@@ -510,6 +567,33 @@ app.post('/api/extract', async (req, res) => {
     place: inferMockPlace(text),
     provider: process.env.GEMINI_API_KEY ? 'mock-ready-for-gemini' : 'mock',
   });
+});
+
+app.post('/api/ai/itinerary', async (req, res) => {
+  const places = Array.isArray(req.body?.places) ? req.body.places : [];
+
+  if (places.length === 0) {
+    res.status(400).json({
+      error: 'EMPTY_PLACES',
+      message: '일정표를 만들 장소가 필요합니다.',
+    });
+    return;
+  }
+
+  try {
+    const itinerary = await generateItineraryWithGemini(req.body);
+    res.json({
+      provider: 'gemini',
+      itinerary,
+    });
+  } catch (error) {
+    console.error('[Gemini itinerary generation failed]', error);
+    res.json({
+      provider: 'fallback',
+      geminiError: error instanceof Error ? error.message : 'Gemini 일정 생성 실패',
+      itinerary: null,
+    });
+  }
 });
 
 app.post('/api/routes/multi-modal', async (req, res) => {

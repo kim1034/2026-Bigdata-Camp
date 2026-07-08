@@ -199,6 +199,161 @@ function routeDisplayText(route) {
   return [route.durationText, route.distanceText].filter(Boolean).join(' · ');
 }
 
+function formatMoveDistance(meters) {
+  if (!Number.isFinite(meters)) return '';
+  if (meters >= 1000) return `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)}km`;
+  return `${Math.round(meters)}m`;
+}
+
+function categoryKind(category) {
+  const text = String(category || '');
+  if (text.includes('카페')) return 'cafe';
+  if (text.includes('맛') || text.includes('식당')) return 'food';
+  if (text.includes('숙') || text.includes('펜션')) return 'stay';
+  if (text.includes('관광') || text.includes('공원')) return 'attraction';
+  return 'place';
+}
+
+function itineraryActivityForPlace(place) {
+  const kind = categoryKind(place?.category);
+  if (kind === 'food') {
+    return {
+      activity: '정갈한 식사와 대표 메뉴 즐기기',
+      duration: '1시간 20분',
+      durationMinutes: 80,
+      tip: `대표 메뉴 ${firstMenuName(place?.menu)}은(는) 웨이팅이 있을 수 있으니 피크 시간을 피해 방문해 보세요.`,
+    };
+  }
+  if (kind === 'cafe') {
+    return {
+      activity: '카페 타임 & 디저트 힐링',
+      duration: '1시간',
+      durationMinutes: 60,
+      tip: `${firstMenuName(place?.menu)}와 함께 쉬어가기 좋은 타이밍입니다.`,
+    };
+  }
+  if (kind === 'stay') {
+    return {
+      activity: '체크인 및 휴식',
+      duration: '1시간',
+      durationMinutes: 60,
+      tip: '숙소 기준 동선의 출발점으로 두고 주변 스팟을 짧은 이동거리 순서로 묶었습니다.',
+    };
+  }
+  return {
+    activity: '여유로운 명소 관람 및 주변 산책',
+    duration: '1시간 30분',
+    durationMinutes: 90,
+    tip: '동선 중간에 배치하면 이동 피로를 줄이고 주변까지 자연스럽게 둘러볼 수 있어요.',
+  };
+}
+
+function buildNearestRoute(basePlace, sourcePlaces, limit = 6) {
+  if (!placeCoordinate(basePlace)) return [];
+
+  const remaining = sourcePlaces
+    .filter((place) => place?.id !== basePlace?.id && placeCoordinate(place))
+    .map((place) => ({
+      ...place,
+      distanceFromBase: calculateDistanceMeters(basePlace, place),
+    }))
+    .sort((a, b) => a.distanceFromBase - b.distanceFromBase)
+    .slice(0, limit);
+
+  const ordered = [];
+  let current = basePlace;
+
+  while (remaining.length) {
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    remaining.forEach((place, index) => {
+      const distance = calculateDistanceMeters(current, place);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    });
+    const [next] = remaining.splice(bestIndex, 1);
+    ordered.push(next);
+    current = next;
+  }
+
+  return ordered;
+}
+
+function buildSmartItinerary(basePlace, orderedPlaces) {
+  const currentTime = new Date();
+  currentTime.setHours(10, 30, 0, 0);
+
+  return orderedPlaces.map((place, index) => {
+    const preset = itineraryActivityForPlace(place);
+    const time = timeText(currentTime);
+    const nextPlace = orderedPlaces[index + 1];
+    let transitToNext = null;
+
+    if (nextPlace) {
+      const distance = calculateDistanceMeters(place, nextPlace);
+      const isWalk = distance < 900;
+      const speedMetersPerMinute = isWalk ? 70 : 420;
+      const minutes = Math.max(2, Math.round(distance / speedMetersPerMinute));
+      transitToNext = {
+        type: isWalk ? 'walk' : 'car',
+        duration: minutes,
+        distance,
+        text: `${isWalk ? '🚶 도보' : '🚗 차량'} 이동 ${minutes}분 (${formatMoveDistance(distance)})`,
+      };
+      addMinutes(currentTime, preset.durationMinutes + minutes);
+    }
+
+    return {
+      place,
+      time,
+      activity: preset.activity,
+      duration: preset.duration,
+      hoursCheck: place.hours || '영업시간 확인 필요',
+      tip:
+        index === 0 && basePlace
+          ? `"${basePlace.name}"에서 가장 가까운 스팟부터 시작하도록 배치했습니다. ${preset.tip}`
+          : preset.tip,
+      transitToNext,
+    };
+  });
+}
+
+function buildItineraryFromGemini(geminiItinerary, orderedPlaces) {
+  const steps = Array.isArray(geminiItinerary?.steps) ? geminiItinerary.steps : [];
+  if (!steps.length) return null;
+
+  return steps.map((step, index) => {
+    const place =
+      orderedPlaces[index] || {
+        id: `gemini-step-${index}`,
+        name: step.placeName || `STEP ${index + 1}`,
+        category: step.category || '장소',
+        address: '',
+        hours: step.hoursStatus || '영업시간 확인 필요',
+      };
+    return {
+      place: {
+        ...place,
+        name: step.placeName || place.name,
+        category: step.category || place.category,
+      },
+      time: step.time || `${String(10 + index).padStart(2, '0')}:30`,
+      activity: step.activity || '추천 활동',
+      duration: step.duration || '1시간',
+      hoursCheck: step.hoursStatus || place.hours || '영업시간 확인 필요',
+      tip: step.tip || 'AI가 이동 거리와 방문 흐름을 기준으로 추천한 순서입니다.',
+      transitToNext: step.moveToNext
+        ? {
+            type: String(step.moveToNext).includes('도보') ? 'walk' : 'car',
+            text: String(step.moveToNext),
+          }
+        : null,
+    };
+  });
+}
+
 function categoryFromGoogleTypes(types = []) {
   if (types.some((type) => ['cafe', 'bakery'].includes(type))) return categories[1]?.label || 'Cafe';
   if (types.some((type) => ['restaurant', 'food', 'meal_takeaway', 'market', 'grocery_or_supermarket'].includes(type))) {
@@ -248,6 +403,13 @@ export default function App() {
     subwayMessage: '',
   });
   const [routeSelectMode, setRouteSelectMode] = useState(false);
+  const [routeSearchOpen, setRouteSearchOpen] = useState(false);
+  const [routeBaseQuery, setRouteBaseQuery] = useState('');
+  const [routeBasePlace, setRouteBasePlace] = useState(null);
+  const [routeScheduleOpen, setRouteScheduleOpen] = useState(false);
+  const [routeScheduleDate, setRouteScheduleDate] = useState(weekendDateString());
+  const [routeScheduleLoading, setRouteScheduleLoading] = useState(false);
+  const [routeScheduleProvider, setRouteScheduleProvider] = useState('');
   const [collections, setCollections] = useState(starterCollections);
   const [selectedCollectionId, setSelectedCollectionId] = useState(starterCollections[0].id);
   const [collectionPickerPlace, setCollectionPickerPlace] = useState(null);
@@ -299,6 +461,14 @@ export default function App() {
     }, {});
   }, [places]);
   const aiRegionPlaces = useMemo(() => placesByRegion[aiSelectedRegion] || [], [placesByRegion, aiSelectedRegion]);
+  const routeSearchResults = useMemo(() => {
+    const text = routeBaseQuery.trim().toLowerCase();
+    const source = places.filter((place) => placeCoordinate(place));
+    if (!text) return source.slice(0, 8);
+    return source
+      .filter((place) => `${place.name} ${place.address} ${place.category}`.toLowerCase().includes(text))
+      .slice(0, 8);
+  }, [places, routeBaseQuery]);
   const selectedRoute = useMemo(
     () => routeExplore.routes.find((route) => route.mode === routeExplore.selectedMode),
     [routeExplore.routes, routeExplore.selectedMode]
@@ -634,11 +804,11 @@ export default function App() {
     if (!aiGeneratedItinerary?.length) return;
     const body = aiGeneratedItinerary
       .map((item, index) => {
-        const moveText = item.transitToNext ? `\n   다음 장소까지 ${item.transitToNext.text}` : '';
-        return `${index + 1}. ${item.time} ${item.place.name}\n   ${item.activity} · ${item.duration}\n   주소: ${item.place.address}\n   AI 팁: ${item.tip}${moveText}`;
+        const moveText = item.transitToNext ? `\n   ▼ 다음 장소로 이동: ${item.transitToNext.text}` : '';
+        return `📍 [STEP ${index + 1}] ${item.time} - ${item.place.name} (${item.place.category})\n   - 주요 활동: ${item.activity} (${item.duration})\n   - 영업 상태: ${item.hoursCheck}\n   - AI 꿀팁: "${item.tip}"${moveText}`;
       })
       .join('\n\n');
-    const message = `[핫플 아카이브] AI 추천 ${aiSelectedRegion} 일정표\n방문 예정일: ${aiSelectedDate}\n\n${body}`;
+    const message = `[스팟로그] AI 추천 ${aiSelectedRegion} 데일리 일정표 📅\n방문 예정일: ${aiSelectedDate}\nAI가 영업시간과 이동 거리를 최적화한 최상의 동선입니다!\n\n${body}`;
 
     try {
       await Share.share({ message });
@@ -989,12 +1159,117 @@ export default function App() {
   }
 
   function makeRoute() {
-    const nextRoute = buildRoute(visiblePlaces.slice(0, 5));
-    setRoutePlaces(nextRoute.length >= 2 ? nextRoute : buildRoute(places.slice(0, 4)));
     setRouteSelectMode(true);
+    setRouteSearchOpen(false);
     setDetailSheetVisible(false);
     setTab('map');
-    showToast('한 손가락으로 지도 위 영역을 찍어주세요');
+    if (!routeBasePlace && selectedPlace) {
+      setRouteBasePlace(selectedPlace);
+      setRouteBaseQuery(selectedPlace.name);
+    }
+    showToast('기준 장소를 검색해서 스마트 동선을 만들어요');
+  }
+
+  function selectRouteBase(place) {
+    setRouteBasePlace(place);
+    setRouteBaseQuery(place.name);
+    setRouteSearchOpen(false);
+    const nextRoute = buildNearestRoute(place, places);
+    setRoutePlaces(nextRoute);
+    showToast(`${place.name} 기준 동선 후보를 정리했어요`);
+  }
+
+  function resolveRouteBasePlace() {
+    if (routeBasePlace && placeCoordinate(routeBasePlace)) return routeBasePlace;
+    const text = routeBaseQuery.trim().toLowerCase();
+    if (!text) return null;
+    return places.find((place) => `${place.name} ${place.address}`.toLowerCase().includes(text) && placeCoordinate(place)) || null;
+  }
+
+  function completeSmartRoute() {
+    const base = resolveRouteBasePlace();
+    if (!base) {
+      setRouteSearchOpen(true);
+      showToast('동선 기준이 될 숙소나 장소를 먼저 검색해 주세요');
+      return null;
+    }
+
+    const nextRoute = buildNearestRoute(base, places);
+    if (nextRoute.length === 0) {
+      showToast('기준점 주변에 동선을 만들 저장 장소가 없어요');
+      return null;
+    }
+
+    setRouteBasePlace(base);
+    setRouteBaseQuery(base.name);
+    setRoutePlaces(nextRoute);
+    setAiSelectedRegion(getRegionOfAddress(base.address));
+    setAiCheckedPlaces(nextRoute.map((place) => place.id));
+    showToast(`${base.name} 기준으로 가까운 순서 동선을 만들었어요`);
+    return { base, route: nextRoute };
+  }
+
+  async function openSmartSchedulePage() {
+    const result = completeSmartRoute();
+    if (!result) return;
+    setRouteSelectMode(false);
+    setRouteScheduleOpen(true);
+    setShowAiResult(false);
+    setAiGeneratedItinerary(null);
+    setRouteScheduleProvider('');
+  }
+
+  function setSmartPresetDate(key) {
+    if (key === 'today') setRouteScheduleDate(todayDateString());
+    if (key === 'tomorrow') setRouteScheduleDate(todayDateString(1));
+    if (key === 'weekend') setRouteScheduleDate(weekendDateString());
+  }
+
+  async function generateSmartSchedule() {
+    const base = resolveRouteBasePlace();
+    const orderedPlaces = routePlaces.length ? routePlaces : base ? buildNearestRoute(base, places) : [];
+    if (!base || orderedPlaces.length === 0) {
+      showToast('먼저 기준 장소로 동선을 만들어 주세요');
+      return;
+    }
+
+    setRouteScheduleLoading(true);
+    setAiSelectedDate(routeScheduleDate);
+    setAiSelectedRegion(getRegionOfAddress(base.address));
+    setAiGenerationStep('Gemini가 기준점, 영업시간, 이동거리를 분석 중...');
+
+    const fallback = buildSmartItinerary(base, orderedPlaces);
+    let nextItinerary = fallback;
+    let provider = 'fallback';
+
+    const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL;
+    if (apiBase) {
+      try {
+        const response = await fetch(`${apiBase.replace(/\/$/, '')}/api/ai/itinerary`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            basePlace: base,
+            places: orderedPlaces,
+            visitDate: routeScheduleDate,
+          }),
+        });
+        const payload = await response.json();
+        const geminiItems = buildItineraryFromGemini(payload?.itinerary, orderedPlaces);
+        if (response.ok && geminiItems?.length) {
+          nextItinerary = geminiItems;
+          provider = payload.provider || 'gemini';
+        }
+      } catch {
+        provider = 'fallback';
+      }
+    }
+
+    setAiGeneratedItinerary(nextItinerary);
+    setShowAiResult(true);
+    setRouteScheduleProvider(provider);
+    setRouteScheduleLoading(false);
+    showToast(provider === 'gemini' ? 'Gemini AI 일정표 생성 완료' : '기본 AI 일정표 생성 완료');
   }
 
   function handleMapSelectPlace(placeId) {
@@ -1056,6 +1331,7 @@ export default function App() {
 
   function closeRouteSelectMode() {
     setRouteSelectMode(false);
+    setRouteSearchOpen(false);
     mapRef.current?.clearRouteCircle();
   }
 
@@ -1829,29 +2105,176 @@ export default function App() {
           <View style={styles.routeEdgeBottom} />
           <View style={styles.routeEdgeLeft} />
           <View style={styles.routeEdgeRight} />
-          <View style={styles.routeGestureLayer} {...routeSelectionResponder.panHandlers} />
           <Glass style={styles.routeSelectGuide}>
             <View style={styles.routeGuideIcon}>
-              <Ionicons name="radio-button-on-outline" size={18} color="#FFFFFF" />
+              <Ionicons name="search-outline" size={18} color="#FFFFFF" />
             </View>
-            <View style={styles.flex}>
-              <Text style={styles.routeGuideTitle}>동선 영역 선택</Text>
-            </View>
+            <TouchableOpacity style={styles.flex} activeOpacity={0.82} onPress={() => setRouteSearchOpen(true)}>
+              <Text style={styles.routeGuideTitle}>동선 영역 검색</Text>
+              <Text style={styles.routeGuideSub}>{routeBasePlace ? routeBasePlace.name : '숙소나 기준 장소를 입력해 주세요'}</Text>
+            </TouchableOpacity>
             <TouchableOpacity activeOpacity={0.78} onPress={closeRouteSelectMode}>
               <Ionicons name="close" size={22} color="#111827" />
             </TouchableOpacity>
           </Glass>
 
+          {routeSearchOpen ? (
+            <Glass style={styles.routeSearchPanel}>
+              <View style={styles.routeSearchInputRow}>
+                <Ionicons name="search-outline" size={18} color="#3182F6" />
+                <TextInput
+                  value={routeBaseQuery}
+                  onChangeText={setRouteBaseQuery}
+                  placeholder="숙소 이름, 장소명, 주소 검색"
+                  placeholderTextColor="#8B95A1"
+                  style={styles.routeSearchInput}
+                  autoFocus
+                />
+              </View>
+              <ScrollView style={styles.routeSearchList} keyboardShouldPersistTaps="handled">
+                {routeSearchResults.map((place) => (
+                  <TouchableOpacity key={place.id} style={styles.routeSearchRow} activeOpacity={0.82} onPress={() => selectRouteBase(place)}>
+                    <View style={[styles.collectionPlaceIcon, { backgroundColor: colorForCategory(place.category) }]}>
+                      <Ionicons name={iconForCategory(place.category)} size={15} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.routeTitle}>{place.name}</Text>
+                      <Text style={styles.routeMeta}>{place.address}</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+                {routeSearchResults.length === 0 ? (
+                  <Text style={styles.routeEmptyText}>저장된 장소에서 검색 결과가 없어요. 먼저 캡처나 지도에서 장소를 등록해 주세요.</Text>
+                ) : null}
+              </ScrollView>
+            </Glass>
+          ) : null}
+
           <Glass style={styles.routeResultSheet}>
             <View style={styles.routeResultTop}>
               <Text style={styles.routeResultTitle}>스마트 동선</Text>
-              <TouchableOpacity style={styles.routeDoneButton} activeOpacity={0.82} onPress={closeRouteSelectMode}>
+              <TouchableOpacity style={styles.routeDoneButton} activeOpacity={0.82} onPress={completeSmartRoute}>
                 <Text style={styles.routeDoneText}>완료</Text>
               </TouchableOpacity>
             </View>
+            {routePlaces.length > 0 ? (
+              <TouchableOpacity style={styles.routeScheduleButton} activeOpacity={0.84} onPress={openSmartSchedulePage}>
+                <Ionicons name="calendar-outline" size={17} color="#FFFFFF" />
+                <Text style={styles.routeScheduleButtonText}>일정 생성</Text>
+              </TouchableOpacity>
+            ) : null}
           </Glass>
         </View>
       )}
+
+      {routeScheduleOpen ? (
+        <View style={styles.routeSchedulePage}>
+          <SafeAreaView style={styles.routeScheduleSafe}>
+            <View style={styles.routeScheduleHeader}>
+              <TouchableOpacity activeOpacity={0.78} onPress={() => setRouteScheduleOpen(false)}>
+                <Ionicons name="chevron-back" size={25} color="#111827" />
+              </TouchableOpacity>
+              <View style={styles.flex}>
+                <Text style={styles.routeScheduleTitle}>AI 추천 데일리 일정표</Text>
+                <Text style={styles.routeScheduleSub}>{routeBasePlace ? `${routeBasePlace.name} 기준` : '기준점 기반'} · {routePlaces.length}곳</Text>
+              </View>
+              <TouchableOpacity activeOpacity={0.78} onPress={shareAiItinerary}>
+                <Ionicons name="share-outline" size={22} color="#3182F6" />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.routeScheduleContent}>
+              <Glass style={styles.card}>
+                <View style={styles.badge}>
+                  <Ionicons name="sparkles" size={15} color="#3182F6" />
+                  <Text style={styles.badgeText}>Gemini AI 동선 플래너</Text>
+                </View>
+                <Text style={styles.cardTitle}>방문 날짜를 선택하면 기준점에서 가까운 순서와 이동 거리를 바탕으로 하루 일정을 만듭니다.</Text>
+                <Text style={styles.fieldLabel}>방문 예정일</Text>
+                <TextInput
+                  value={routeScheduleDate}
+                  onChangeText={setRouteScheduleDate}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor="#8B95A1"
+                  style={styles.fieldInput}
+                />
+                <View style={styles.aiDateRow}>
+                  {[
+                    ['today', '오늘'],
+                    ['tomorrow', '내일'],
+                    ['weekend', '이번 주말'],
+                  ].map(([key, label]) => (
+                    <TouchableOpacity key={key} style={styles.aiDateButton} activeOpacity={0.82} onPress={() => setSmartPresetDate(key)}>
+                      <Text style={styles.aiDateButtonText}>{label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                <TouchableOpacity
+                  style={[styles.aiGenerateButton, routeScheduleLoading && styles.aiGenerateButtonOff]}
+                  activeOpacity={0.86}
+                  disabled={routeScheduleLoading}
+                  onPress={generateSmartSchedule}
+                >
+                  {routeScheduleLoading ? <ActivityIndicator size="small" color="#FFFFFF" /> : <Ionicons name="sparkles" size={18} color="#FFFFFF" />}
+                  <Text style={styles.aiGenerateText}>{routeScheduleLoading ? 'AI 일정 생성 중...' : 'AI 일정 생성하기'}</Text>
+                </TouchableOpacity>
+                {routeScheduleProvider ? (
+                  <Text style={styles.settingDesc}>
+                    {routeScheduleProvider === 'gemini' ? 'Gemini API로 생성된 일정표입니다.' : 'Gemini 연결이 없거나 실패해 앱 내부 로직으로 생성했습니다.'}
+                  </Text>
+                ) : null}
+              </Glass>
+
+              {aiGeneratedItinerary?.length ? (
+                <Glass style={styles.card}>
+                  <View style={styles.aiScheduleHeader}>
+                    <Ionicons name="calendar-outline" size={20} color="#FF7A00" />
+                    <View style={styles.flex}>
+                      <Text style={styles.resultTitle}>[스팟로그] AI 추천 {aiSelectedRegion} 데일리 일정표 📅</Text>
+                      <Text style={styles.routeMeta}>방문 예정일: {routeScheduleDate}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.detailDesc}>AI가 영업시간과 이동 거리를 최적화한 최상의 동선입니다!</Text>
+
+                  {aiGeneratedItinerary.map((item, index) => (
+                    <View key={`${item.place.id}-${index}`} style={styles.aiTimelineBlock}>
+                      <View style={styles.aiTimelineDot}>
+                        <Text style={styles.aiTimelineDotText}>{index + 1}</Text>
+                      </View>
+                      <View style={styles.aiTimelineCard}>
+                        <View style={styles.aiTimelineTop}>
+                          <Text style={styles.timelineTime}>{item.time}</Text>
+                          <Text style={styles.aiDurationText}>{item.duration}</Text>
+                        </View>
+                        <Text style={styles.routeTitle}>[STEP {index + 1}] {item.place.name} ({item.place.category})</Text>
+                        <View style={styles.aiActivityBox}>
+                          <Ionicons name="sparkles-outline" size={14} color="#3182F6" />
+                          <Text style={styles.aiActivityText}>{item.activity}</Text>
+                        </View>
+                        <Text style={styles.aiHoursText}>{item.hoursCheck}</Text>
+                        <View style={styles.aiTipBox}>
+                          <Text style={styles.aiTipText}>AI 꿀팁: "{item.tip}"</Text>
+                        </View>
+                      </View>
+                      {item.transitToNext ? (
+                        <View style={styles.aiMoveBox}>
+                          <Ionicons name={item.transitToNext.type === 'walk' ? 'walk-outline' : 'car-outline'} size={14} color="#E53935" />
+                          <Text style={styles.aiMoveText}>다음 장소로 이동: {item.transitToNext.text}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  ))}
+
+                  <TouchableOpacity style={styles.primaryButton} activeOpacity={0.86} onPress={shareAiItinerary}>
+                    <Ionicons name="share-outline" size={18} color="#FFFFFF" />
+                    <Text style={styles.primaryButtonText}>외부 앱으로 공유</Text>
+                  </TouchableOpacity>
+                </Glass>
+              ) : null}
+            </ScrollView>
+          </SafeAreaView>
+        </View>
+      ) : null}
 
       {toast ? (
         <View style={styles.toast}>
