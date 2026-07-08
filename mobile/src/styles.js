@@ -1,6 +1,8 @@
-import { Dimensions, Platform, StyleSheet } from 'react-native';
+import { Dimensions, Platform, StatusBar, StyleSheet } from 'react-native';
 
 const { width } = Dimensions.get('window');
+const topInset = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 44;
+const topTouchGap = topInset + 14;
 
 export const styles = StyleSheet.create({
   safe: {
@@ -130,7 +132,7 @@ export const styles = StyleSheet.create({
   },
   searchBox: {
     position: 'absolute',
-    top: Platform.OS === 'android' ? 26 : 8,
+    top: topTouchGap,
     left: 18,
     right: 18,
   },
@@ -151,7 +153,7 @@ export const styles = StyleSheet.create({
   },
   categoryRail: {
     position: 'absolute',
-    top: Platform.OS === 'android' ? 90 : 72,
+    top: topTouchGap + 64,
     left: 0,
     right: 0,
   },
@@ -246,7 +248,7 @@ export const styles = StyleSheet.create({
   routeSelectGuide: {
     position: 'absolute',
     zIndex: 5,
-    top: Platform.OS === 'android' ? 92 : 84,
+    top: topTouchGap + 72,
     left: 18,
     right: 18,
     minHeight: 58,
@@ -301,7 +303,7 @@ export const styles = StyleSheet.create({
   routeSearchPanel: {
     position: 'absolute',
     zIndex: 6,
-    top: Platform.OS === 'android' ? 162 : 154,
+    top: topTouchGap + 142,
     left: 18,
     right: 18,
     maxHeight: 330,
@@ -380,6 +382,7 @@ export const styles = StyleSheet.create({
   },
   routeScheduleSafe: {
     flex: 1,
+    paddingTop: topInset,
   },
   routeScheduleHeader: {
     minHeight: 62,
@@ -409,7 +412,7 @@ export const styles = StyleSheet.create({
   },
   mapStatusBadge: {
     position: 'absolute',
-    top: Platform.OS === 'android' ? 138 : 120,
+    top: topTouchGap + 112,
     left: 18,
     right: 18,
     minHeight: 42,
@@ -430,7 +433,7 @@ export const styles = StyleSheet.create({
   mapControlStack: {
     position: 'absolute',
     right: 20,
-    top: Platform.OS === 'android' ? 148 : 130,
+    top: topTouchGap + 122,
     gap: 10,
   },
   mapRoundButton: {
@@ -818,14 +821,14 @@ export const styles = StyleSheet.create({
     fontWeight: '700',
   },
   page: {
-    paddingTop: Platform.OS === 'android' ? 30 : 12,
+    paddingTop: topTouchGap,
     paddingHorizontal: 18,
     paddingBottom: 112,
     backgroundColor: '#F7F8FA',
     gap: 14,
   },
   settingsPage: {
-    paddingTop: Platform.OS === 'android' ? 46 : 34,
+    paddingTop: topTouchGap + 12,
   },
   pageTitle: {
     color: '#191F28',
