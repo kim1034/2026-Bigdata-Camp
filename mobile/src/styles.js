@@ -624,6 +624,21 @@ export const styles = StyleSheet.create({
     lineHeight: 16,
     fontWeight: '700',
   },
+  transitStepsBox: {
+    width: '100%',
+    borderRadius: 16,
+    backgroundColor: 'rgba(234,243,255,0.82)',
+    padding: 12,
+    gap: 8,
+  },
+  transitStepRow: {
+    gap: 2,
+  },
+  transitStepLine: {
+    color: '#191F28',
+    fontSize: 12,
+    fontWeight: '900',
+  },
   page: {
     paddingTop: Platform.OS === 'android' ? 30 : 12,
     paddingHorizontal: 18,
@@ -964,6 +979,13 @@ export const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  collectionRouteButton: {
+    padding: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(229,57,53,0.1)',
     alignItems: 'center',
     justifyContent: 'center',
   },

@@ -391,6 +391,9 @@ export default function App() {
   const [routeSearchOpen, setRouteSearchOpen] = useState(false);
   const [routeBaseQuery, setRouteBaseQuery] = useState('');
   const [routeBasePlace, setRouteBasePlace] = useState(null);
+  const [routeOrigin, setRouteOrigin] = useState(null);
+  const [originPickerOpen, setOriginPickerOpen] = useState(false);
+  const [originQuery, setOriginQuery] = useState('');
   const [routeScheduleOpen, setRouteScheduleOpen] = useState(false);
   const [routeScheduleDate, setRouteScheduleDate] = useState(weekendDateString());
   const [routeScheduleLoading, setRouteScheduleLoading] = useState(false);
@@ -437,6 +440,14 @@ export default function App() {
       .filter((place) => `${place.name} ${place.address} ${place.category}`.toLowerCase().includes(text))
       .slice(0, 8);
   }, [places, routeBaseQuery]);
+  const originSearchResults = useMemo(() => {
+    const text = originQuery.trim().toLowerCase();
+    const source = places.filter((place) => placeCoordinate(place) && place.id !== selectedPlace?.id);
+    if (!text) return source.slice(0, 8);
+    return source
+      .filter((place) => `${place.name} ${place.address} ${place.category}`.toLowerCase().includes(text))
+      .slice(0, 8);
+  }, [places, originQuery, selectedPlace]);
   const routeSelectionResponder = useMemo(
     () =>
       PanResponder.create({
@@ -1169,14 +1180,16 @@ export default function App() {
     }
   }
 
-  async function exploreSelectedPlaceRoute() {
-    if (!selectedPlace) return;
+  async function exploreSelectedPlaceRoute(placeOverride, originOverride) {
+    const place = placeOverride || selectedPlace;
+    if (!place) return;
 
-    const origin = userLocation ? placeCoordinate(userLocation) : null;
-    const destination = placeCoordinate(selectedPlace);
+    const originPlace = originOverride || routeOrigin || userLocation;
+    const origin = originPlace ? placeCoordinate(originPlace) : null;
+    const destination = placeCoordinate(place);
 
     if (!origin) {
-      showToast('현재 위치를 먼저 확인해 주세요');
+      showToast('출발지를 먼저 설정해 주세요');
       mapRef.current?.runMapCommand('centerUser');
       return;
     }
@@ -1228,7 +1241,7 @@ export default function App() {
 
       if (firstReady) {
         mapRef.current?.renderRoutePolyline(firstReady.encodedPolyline);
-        showToast(`${selectedPlace.name}까지 경로를 표시했어요`);
+        showToast(`${place.name}까지 경로를 표시했어요`);
       } else {
         mapRef.current?.clearRoutePolyline();
         showToast(firstMessage);
@@ -1244,6 +1257,13 @@ export default function App() {
       mapRef.current?.clearRoutePolyline();
       showToast(message);
     }
+  }
+
+  function selectRouteOrigin(place) {
+    setRouteOrigin(place);
+    setOriginQuery(place ? place.name : '');
+    setOriginPickerOpen(false);
+    exploreSelectedPlaceRoute(selectedPlace, place || userLocation);
   }
 
   function updateVerification(key, value) {
@@ -1334,6 +1354,9 @@ export default function App() {
                     {routeInfo.status === 'ready' && routeInfo.durationText ? ` · ${routeInfo.durationText}` : ''}
                   </Text>
                 </View>
+                <TouchableOpacity activeOpacity={0.78} onPress={() => setDetailSheetVisible(false)}>
+                  <Ionicons name="close" size={22} color="#111827" />
+                </TouchableOpacity>
               </View>
               <Text style={styles.detailDesc}>{selectedPlace.reviewSummary}</Text>
               <View style={styles.infoGrid}>
@@ -1347,9 +1370,26 @@ export default function App() {
                 </View>
               </View>
               <TouchableOpacity
+                style={styles.collectionPlaceRow}
+                activeOpacity={0.82}
+                onPress={() => {
+                  setOriginQuery(routeOrigin ? routeOrigin.name : '');
+                  setOriginPickerOpen(true);
+                }}
+              >
+                <View style={[styles.collectionPlaceIcon, { backgroundColor: '#3182F6' }]}>
+                  <Ionicons name="locate-outline" size={16} color="#FFFFFF" />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.routeMeta}>출발지</Text>
+                  <Text style={styles.routeTitle}>{routeOrigin ? routeOrigin.name : '현재 위치'}</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="#8B95A1" />
+              </TouchableOpacity>
+              <TouchableOpacity
                 style={styles.routeExploreButton}
                 activeOpacity={0.86}
-                onPress={exploreSelectedPlaceRoute}
+                onPress={() => exploreSelectedPlaceRoute()}
                 disabled={routeExplore.status === 'loading'}
               >
                 {routeExplore.status === 'loading' ? (
@@ -1386,6 +1426,34 @@ export default function App() {
                     );
                   })}
                   {routeExplore.message ? <Text style={styles.routeExploreMessage}>{routeExplore.message}</Text> : null}
+                  {routeExplore.selectedMode === 'TRANSIT' ? (() => {
+                    const transitRoute = routeExplore.routes.find((item) => item.mode === 'TRANSIT');
+                    const steps = transitRoute?.transitSteps || [];
+                    if (!steps.length) return null;
+                    return (
+                      <View style={styles.transitStepsBox}>
+                        <View style={styles.transitRealtimeHeader}>
+                          <Ionicons name="bus-outline" size={15} color="#3182F6" />
+                          <Text style={styles.transitRealtimeTitle}>대중교통 상세 경로</Text>
+                        </View>
+                        {steps.map((step, index) => (
+                          <View key={`${step.lineShortName || step.lineName || 'step'}-${index}`} style={styles.transitStepRow}>
+                            <Text style={styles.transitStepLine}>
+                              {step.vehicleName || '대중교통'} {step.lineShortName || step.lineName}
+                            </Text>
+                            <Text style={styles.transitRealtimeText}>
+                              {step.departureStop} 승차 → {step.arrivalStop} 하차
+                              {step.numStops ? ` · ${step.numStops}정거장` : ''}
+                              {step.durationText ? ` · ${step.durationText}` : ''}
+                            </Text>
+                            {step.departureTime || step.arrivalTime ? (
+                              <Text style={styles.transitRealtimeMuted}>{step.departureTime} → {step.arrivalTime}</Text>
+                            ) : null}
+                          </View>
+                        ))}
+                      </View>
+                    );
+                  })() : null}
                   {routeExplore.selectedMode === 'TRANSIT' && transitRealtime.status !== 'idle' ? (
                     <View style={styles.transitRealtimeBox}>
                       <View style={styles.transitRealtimeHeader}>
@@ -1584,6 +1652,18 @@ export default function App() {
                       <Text style={styles.routeTitle}>{place.name}</Text>
                       <Text style={styles.routeMeta}>{place.category} · {place.address}</Text>
                     </View>
+                    <TouchableOpacity
+                      style={styles.collectionRouteButton}
+                      activeOpacity={0.82}
+                      onPress={() => {
+                        setSelectedPlace(place);
+                        setDetailSheetVisible(true);
+                        setTab('map');
+                        exploreSelectedPlaceRoute(place);
+                      }}
+                    >
+                      <Ionicons name="navigate-outline" size={18} color="#E53935" />
+                    </TouchableOpacity>
                     <Ionicons name="chevron-forward" size={18} color="#8B95A1" />
                   </TouchableOpacity>
                 ))
@@ -1844,6 +1924,60 @@ export default function App() {
               <Ionicons name="add" size={18} color="#3182F6" />
               <Text style={styles.secondaryButtonText}>새 컬렉션 만들기</Text>
             </TouchableOpacity>
+          </Glass>
+        </View>
+      ) : null}
+
+      {originPickerOpen ? (
+        <View style={styles.collectionPickerOverlay}>
+          <TouchableOpacity style={styles.collectionPickerBackdrop} activeOpacity={1} onPress={() => setOriginPickerOpen(false)} />
+          <Glass style={styles.collectionPickerSheet}>
+            <View style={styles.collectionPickerTop}>
+              <View>
+                <Text style={styles.collectionPickerTitle}>출발지 선택</Text>
+                <Text style={styles.collectionPickerSub}>현재 위치 또는 다른 장소에서 출발할 수 있어요.</Text>
+              </View>
+              <TouchableOpacity activeOpacity={0.78} onPress={() => setOriginPickerOpen(false)}>
+                <Ionicons name="close" size={22} color="#111827" />
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity style={styles.collectionPickerRow} activeOpacity={0.82} onPress={() => selectRouteOrigin(null)}>
+              <View style={[styles.collectionPlaceIcon, { backgroundColor: '#3182F6' }]}>
+                <Ionicons name="locate" size={16} color="#FFFFFF" />
+              </View>
+              <View style={styles.flex}>
+                <Text style={styles.routeTitle}>현재 위치</Text>
+                <Text style={styles.routeMeta}>GPS로 확인한 내 위치에서 출발</Text>
+              </View>
+              {!routeOrigin ? <Ionicons name="checkmark-circle-outline" size={20} color="#3182F6" /> : null}
+            </TouchableOpacity>
+            <View style={styles.routeSearchInputRow}>
+              <Ionicons name="search-outline" size={18} color="#3182F6" />
+              <TextInput
+                value={originQuery}
+                onChangeText={setOriginQuery}
+                placeholder="장소 이름, 주소로 검색"
+                placeholderTextColor="#8B95A1"
+                style={styles.routeSearchInput}
+              />
+            </View>
+            <ScrollView style={styles.routeSearchList} keyboardShouldPersistTaps="handled">
+              {originSearchResults.map((place) => (
+                <TouchableOpacity key={place.id} style={styles.routeSearchRow} activeOpacity={0.82} onPress={() => selectRouteOrigin(place)}>
+                  <View style={[styles.collectionPlaceIcon, { backgroundColor: colorForCategory(place.category) }]}>
+                    <Ionicons name={iconForCategory(place.category)} size={15} color="#FFFFFF" />
+                  </View>
+                  <View style={styles.flex}>
+                    <Text style={styles.routeTitle}>{place.name}</Text>
+                    <Text style={styles.routeMeta}>{place.address}</Text>
+                  </View>
+                  {routeOrigin?.id === place.id ? <Ionicons name="checkmark-circle-outline" size={20} color="#3182F6" /> : null}
+                </TouchableOpacity>
+              ))}
+              {originSearchResults.length === 0 ? (
+                <Text style={styles.routeEmptyText}>검색 결과가 없어요. 다른 이름으로 다시 검색해 주세요.</Text>
+              ) : null}
+            </ScrollView>
           </Glass>
         </View>
       ) : null}
