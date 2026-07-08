@@ -5,10 +5,12 @@ import {
   Trash2, Plus, X, ChevronRight, Sparkles, Clock, 
   Search, Heart, Info, AlertCircle, Check, Map as MapIcon,
   HelpCircle, ChevronDown, ListFilter, RotateCcw,
-  ArrowUp, ArrowDown, Share2, Copy, Calendar
+  ArrowUp, ArrowDown, Share2, Copy, Calendar, LogOut,
+  Settings as SettingsIcon
 } from "lucide-react";
 
 import Map from "./components/Map";
+import Settings from "./components/Settings";
 import { Place, CategoryType, ExtractionResult, PlaceMenu } from "./types";
 import { INITIAL_PLACES, DEMO_SCREENSHOTS } from "./data";
 import {
@@ -17,7 +19,13 @@ import {
   loadPlacesFromFirestore,
   replacePlacesInFirestore,
   savePlaceToFirestore,
+  getFirebaseAuth,
 } from "./services/firebaseDb";
+import {
+  onAuthStateChanged,
+  signOut as firebaseSignOut,
+  type User,
+} from "firebase/auth";
 
 export default function App() {
   // Load places from localStorage, or default to initial preset places
@@ -52,6 +60,10 @@ export default function App() {
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractionStep, setExtractionStep] = useState<string>("");
+
+  // Auth state
+  const [user, setUser] = useState<User | null>(null);
+  const currentWorkspaceId = user ? `user_${user.uid}` : "default";
   
   // Verification states
   const [extractedResult, setExtractedResult] = useState<ExtractionResult | null>(null);
@@ -72,8 +84,8 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const firebaseHydratedRef = useRef(false);
 
-  // Tab Navigation: "my-places" | "route-planner" | "regional-share" | "ai-itinerary"
-  const [activeTab, setActiveTab] = useState<"my-places" | "route-planner" | "regional-share" | "ai-itinerary">("my-places");
+  // Tab Navigation: "my-places" | "route-planner" | "regional-share" | "ai-itinerary" | "settings"
+  const [activeTab, setActiveTab] = useState<"my-places" | "route-planner" | "regional-share" | "ai-itinerary" | "settings">("my-places");
 
   // Feature 4: AI Itinerary Planner States
   interface ItineraryItem {
@@ -129,16 +141,21 @@ export default function App() {
       }
 
       try {
-        const remotePlaces = await loadPlacesFromFirestore();
+        const remotePlaces = await loadPlacesFromFirestore(currentWorkspaceId);
         if (!isMounted) return;
 
         firebaseHydratedRef.current = true;
         if (remotePlaces.length > 0) {
           setPlaces(remotePlaces);
-          return;
+        } else {
+          // If logged in and the private store is empty, sync local guest data up to cloud
+          if (user && places.length > 0 && places !== INITIAL_PLACES) {
+            await replacePlacesInFirestore(places, currentWorkspaceId);
+          } else {
+            await replacePlacesInFirestore(INITIAL_PLACES, currentWorkspaceId);
+            setPlaces(INITIAL_PLACES);
+          }
         }
-
-        await replacePlacesInFirestore(INITIAL_PLACES);
       } catch (error) {
         console.warn("Failed to load places from Firestore", error);
       }
@@ -149,6 +166,18 @@ export default function App() {
     return () => {
       isMounted = false;
     };
+  }, [user]);
+
+  // Listen for authentication changes
+  useEffect(() => {
+    const auth = getFirebaseAuth();
+    if (!auth) return;
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   // Haversine formula to compute distance in meters between two lat/lngs
@@ -667,7 +696,7 @@ export default function App() {
     };
 
     setPlaces((prev) => [newPlace, ...prev]);
-    savePlaceToFirestore(newPlace).catch((error) => {
+    savePlaceToFirestore(newPlace, currentWorkspaceId).catch((error) => {
       console.warn("Failed to save place to Firestore", error);
     });
     setSelectedPlace(newPlace); // Center map on the newly saved place
@@ -686,7 +715,7 @@ export default function App() {
   // Perform actual deletion of the place after confirmation
   const executeDeletePlace = (id: string) => {
     setPlaces((prev) => prev.filter((p) => p.id !== id));
-    deletePlaceFromFirestore(id).catch((error) => {
+    deletePlaceFromFirestore(id, currentWorkspaceId).catch((error) => {
       console.warn("Failed to delete place from Firestore", error);
     });
     if (selectedPlace?.id === id) {
@@ -703,7 +732,7 @@ export default function App() {
   // Perform actual reset after confirmation
   const executeResetPresets = () => {
     setPlaces(INITIAL_PLACES);
-    replacePlacesInFirestore(INITIAL_PLACES).catch((error) => {
+    replacePlacesInFirestore(INITIAL_PLACES, currentWorkspaceId).catch((error) => {
       console.warn("Failed to reset Firestore places", error);
     });
     setSelectedPlace(null);
@@ -773,6 +802,38 @@ export default function App() {
           </button>
         </div>
 
+        {/* Authentication Bar */}
+        <div className="px-5 py-3 border-b border-gray-150 bg-[#FAF9F6]/50 flex flex-col gap-2 shrink-0">
+          {user && (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt={user.displayName || "User"} className="w-8 h-8 rounded-full border border-gray-250" referrerPolicy="no-referrer" />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center font-bold text-xs text-[#FF5A5F]">
+                    {user.displayName ? user.displayName.slice(0, 1) : "U"}
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-gray-800 truncate">{user.displayName || "사용자"}</p>
+                  <p className="text-[10px] text-gray-400 truncate">{user.email}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  const auth = getFirebaseAuth();
+                  if (auth) firebaseSignOut(auth);
+                }}
+                className="p-1.5 rounded-lg text-gray-450 hover:text-red-500 hover:bg-red-50 transition-colors flex items-center gap-1 text-[11px] font-bold cursor-pointer"
+                title="로그아웃"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>로그아웃</span>
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Tab Navigation */}
         <div className="flex border-b border-gray-150 bg-gray-50/50 p-1 shrink-0">
           <button
@@ -818,6 +879,17 @@ export default function App() {
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
             AI 일정 짜기
+          </button>
+          <button
+            onClick={() => setActiveTab("settings")}
+            className={`flex-1 py-2 rounded-xl text-[11px] font-black transition-all flex items-center justify-center gap-1 cursor-pointer ${
+              activeTab === "settings"
+                ? "bg-white text-[#FF5A5F] shadow-sm border border-gray-200"
+                : "text-gray-500 hover:text-gray-800"
+            }`}
+          >
+            <SettingsIcon className="w-3.5 h-3.5" />
+            설정
           </button>
         </div>
 
@@ -1516,6 +1588,10 @@ export default function App() {
                 </div>
               )}
             </div>
+          )}
+
+          {activeTab === "settings" && (
+            <Settings user={user} />
           )}
 
         </div>

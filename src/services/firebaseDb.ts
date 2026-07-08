@@ -4,12 +4,24 @@ import {
   deleteDoc,
   doc,
   getDocs,
+  getDoc,
   getFirestore,
   setDoc,
   writeBatch,
   type Firestore,
 } from 'firebase/firestore';
+import { getAuth, type Auth, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import type { Place } from '../types';
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string;
+  bio: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 const FIREBASE_KEYS = [
   'apiKey',
@@ -48,10 +60,32 @@ function getDb(): Firestore | null {
   return getFirestore(app);
 }
 
-function placesCollection(db: Firestore) {
+let authInstance: Auth | null = null;
+let persistencePromise: Promise<void> | null = null;
+
+export function getFirebaseAuth(): Auth | null {
+  const config = getFirebaseConfig();
+  if (!config) return null;
+
+  if (!authInstance) {
+    const app = getApps().length ? getApp() : initializeApp(config);
+    authInstance = getAuth(app);
+    
+    // Set persistence to local storage - keeps user logged in after page refresh
+    if (!persistencePromise) {
+      persistencePromise = setPersistence(authInstance, browserLocalPersistence)
+        .catch((error) => {
+          console.warn('Failed to set auth persistence:', error);
+        });
+    }
+  }
+  return authInstance;
+}
+
+function placesCollection(db: Firestore, workspaceId?: string) {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env || {};
-  const workspaceId = env.VITE_FIREBASE_WORKSPACE_ID || env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
-  return collection(db, 'workspaces', workspaceId, 'places');
+  const actualWorkspaceId = workspaceId || env.VITE_FIREBASE_WORKSPACE_ID || env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
+  return collection(db, 'workspaces', actualWorkspaceId, 'places');
 }
 
 function normalizePlace(raw: any): Place {
@@ -87,39 +121,77 @@ export function isFirebaseDbConfigured() {
   return Boolean(getFirebaseConfig());
 }
 
-export async function loadPlacesFromFirestore(): Promise<Place[]> {
+export async function loadPlacesFromFirestore(workspaceId?: string): Promise<Place[]> {
   const db = getDb();
   if (!db) return [];
 
-  const snapshot = await getDocs(placesCollection(db));
+  const snapshot = await getDocs(placesCollection(db, workspaceId));
   return snapshot.docs
     .map((item) => normalizePlace({ id: item.id, ...item.data() }))
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
-export async function savePlaceToFirestore(place: Place) {
+export async function savePlaceToFirestore(place: Place, workspaceId?: string) {
   const db = getDb();
   if (!db) return;
 
-  await setDoc(doc(placesCollection(db), place.id), serializePlace(place), { merge: true });
+  await setDoc(doc(placesCollection(db, workspaceId), place.id), serializePlace(place), { merge: true });
 }
 
-export async function deletePlaceFromFirestore(placeId: string) {
+export async function deletePlaceFromFirestore(placeId: string, workspaceId?: string) {
   const db = getDb();
   if (!db) return;
 
-  await deleteDoc(doc(placesCollection(db), placeId));
+  await deleteDoc(doc(placesCollection(db, workspaceId), placeId));
 }
 
-export async function replacePlacesInFirestore(places: Place[]) {
+export async function replacePlacesInFirestore(places: Place[], workspaceId?: string) {
   const db = getDb();
   if (!db) return;
 
   const batch = writeBatch(db);
-  const current = await getDocs(placesCollection(db));
+  const current = await getDocs(placesCollection(db, workspaceId));
   current.docs.forEach((item) => batch.delete(item.ref));
   places.forEach((place) => {
-    batch.set(doc(placesCollection(db), place.id), serializePlace(place));
+    batch.set(doc(placesCollection(db, workspaceId), place.id), serializePlace(place));
   });
   await batch.commit();
+}
+
+// ============ User Profile Functions ============
+
+export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  const db = getDb();
+  if (!db) return null;
+
+  try {
+    console.log(`Fetching profile for uid: ${uid}`);
+    const userDocRef = doc(db, 'users', uid);
+    const userSnapshot = await getDoc(userDocRef);
+    
+    if (userSnapshot.exists()) {
+      console.log(`Profile found for ${uid}:`, userSnapshot.data());
+      return userSnapshot.data() as UserProfile;
+    }
+    console.log(`No profile found for ${uid}`);
+    return null;
+  } catch (error) {
+    console.error('프로필 로드 실패:', error);
+    return null;
+  }
+}
+
+export async function saveUserProfile(profile: UserProfile): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+
+  try {
+    console.log(`Saving profile for uid: ${profile.uid}`, profile);
+    const userDocRef = doc(db, 'users', profile.uid);
+    await setDoc(userDocRef, profile, { merge: true });
+    console.log(`✓ 사용자 프로필 저장됨: ${profile.uid}`);
+  } catch (error) {
+    console.error('프로필 저장 실패:', error);
+    throw error;
+  }
 }

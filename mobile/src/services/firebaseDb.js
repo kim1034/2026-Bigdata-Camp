@@ -7,6 +7,7 @@ import {
   getFirestore,
   setDoc,
 } from 'firebase/firestore';
+import { getAuth } from 'firebase/auth';
 
 const requiredKeys = [
   'EXPO_PUBLIC_FIREBASE_API_KEY',
@@ -40,14 +41,27 @@ function getDb() {
   return getFirestore(app);
 }
 
-function placesCollection(db) {
-  const workspaceId = process.env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
-  return collection(db, 'workspaces', workspaceId, 'places');
+let authInstance = null;
+
+export function getFirebaseAuth() {
+  const config = getConfig();
+  if (!config) return null;
+
+  if (!authInstance) {
+    const app = getApps().length ? getApp() : initializeApp(config);
+    authInstance = getAuth(app);
+  }
+  return authInstance;
 }
 
-function collectionsCollection(db) {
-  const workspaceId = process.env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
-  return collection(db, 'workspaces', workspaceId, 'collections');
+function placesCollection(db, workspaceId) {
+  const actualWorkspaceId = workspaceId || process.env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
+  return collection(db, 'workspaces', actualWorkspaceId, 'places');
+}
+
+function collectionsCollection(db, workspaceId) {
+  const actualWorkspaceId = workspaceId || process.env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
+  return collection(db, 'workspaces', actualWorkspaceId, 'collections');
 }
 
 function serializePlace(place) {
@@ -105,38 +119,38 @@ export function isFirebaseDbConfigured() {
   return Boolean(getConfig());
 }
 
-export async function loadPlacesFromFirestore() {
+export async function loadPlacesFromFirestore(workspaceId) {
   const db = getDb();
   if (!db) return [];
-  const snapshot = await getDocs(placesCollection(db));
+  const snapshot = await getDocs(placesCollection(db, workspaceId));
   return snapshot.docs
     .map((item) => normalizePlace({ id: item.id, ...item.data() }))
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
-export async function savePlaceToFirestore(place) {
+export async function savePlaceToFirestore(place, workspaceId) {
   const db = getDb();
   if (!db) return;
-  await setDoc(doc(placesCollection(db), place.id), serializePlace(place), { merge: true });
+  await setDoc(doc(placesCollection(db, workspaceId), place.id), serializePlace(place), { merge: true });
 }
 
-export async function loadCollectionsFromFirestore() {
+export async function loadCollectionsFromFirestore(workspaceId) {
   const db = getDb();
   if (!db) return [];
-  const snapshot = await getDocs(collectionsCollection(db));
+  const snapshot = await getDocs(collectionsCollection(db, workspaceId));
   return snapshot.docs
     .map((item) => normalizeCollection({ id: item.id, ...item.data() }))
     .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
-export async function saveCollectionToFirestore(item) {
+export async function saveCollectionToFirestore(item, workspaceId) {
   const db = getDb();
   if (!db) return;
-  await setDoc(doc(collectionsCollection(db), item.id), serializeCollection(item), { merge: true });
+  await setDoc(doc(collectionsCollection(db, workspaceId), item.id), serializeCollection(item), { merge: true });
 }
 
-export async function deleteCollectionFromFirestore(collectionId) {
+export async function deleteCollectionFromFirestore(collectionId, workspaceId) {
   const db = getDb();
   if (!db) return;
-  await deleteDoc(doc(collectionsCollection(db), collectionId));
+  await deleteDoc(doc(collectionsCollection(db, workspaceId), collectionId));
 }

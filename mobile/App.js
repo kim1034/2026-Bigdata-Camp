@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Modal,
   PanResponder,
   SafeAreaView,
   ScrollView,
@@ -17,10 +18,18 @@ import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import { WebView } from 'react-native-webview';
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithCredential,
+  signOut as firebaseSignOut,
+} from 'firebase/auth';
 import { GoogleMapWebView } from './src/components/GoogleMapWebView';
 import { categories, demoScreenshots, demoTexts, initialPlaces } from './src/data/places';
 import {
   deleteCollectionFromFirestore,
+  getFirebaseAuth,
   isFirebaseDbConfigured,
   loadCollectionsFromFirestore,
   loadPlacesFromFirestore,
@@ -265,6 +274,71 @@ export default function App() {
   const [aiGeneratedItinerary, setAiGeneratedItinerary] = useState(null);
   const [showAiResult, setShowAiResult] = useState(false);
 
+  const [user, setUser] = useState(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const currentWorkspaceId = user ? `user_${user.uid}` : 'default';
+
+  // Listen to Auth State Changes
+  useEffect(() => {
+    const auth = getFirebaseAuth();
+    if (!auth) return;
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const GOOGLE_OAUTH_URL = useMemo(() => {
+    const clientId = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID || '899808413915-yourgoogleclientid.apps.googleusercontent.com';
+    const redirectUri = 'https://localhost';
+    const scope = 'openid email profile';
+    const nonce = Math.random().toString(36).substring(2, 15);
+    return `https://accounts.google.com/o/oauth2/v2/auth?` +
+      `client_id=${encodeURIComponent(clientId)}` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&response_type=id_token` +
+      `&scope=${encodeURIComponent(scope)}` +
+      `&nonce=${encodeURIComponent(nonce)}` +
+      `&state=spotlog-mobile-oauth`;
+  }, []);
+
+  const handleNavigationStateChange = async (navState) => {
+    const { url } = navState;
+    if (url.startsWith('https://localhost')) {
+      setIsLoginModalOpen(false);
+      const hashIndex = url.indexOf('#');
+      if (hashIndex !== -1) {
+        const fragment = url.substring(hashIndex + 1);
+        const params = {};
+        fragment.split('&').forEach((part) => {
+          const [key, val] = part.split('=');
+          if (key && val) {
+            params[key] = decodeURIComponent(val);
+          }
+        });
+
+        const idToken = params.id_token;
+        if (idToken) {
+          try {
+            const auth = getFirebaseAuth();
+            if (auth) {
+              const credential = GoogleAuthProvider.credential(idToken);
+              await signInWithCredential(auth, credential);
+              showToast('Google 로그인 성공!');
+            }
+          } catch (error) {
+            console.error('Firebase Auth Sign In Failed:', error);
+            Alert.alert('로그인 실패', '구글 로그인 인증에 실패했습니다.\n' + error.message);
+          }
+        } else {
+          Alert.alert('로그인 실패', '구글 인증 정보가 누락되었습니다.');
+        }
+      }
+    }
+  };
+
   const visiblePlaces = useMemo(() => {
     return places.filter((place) => {
       const categoryMatched = category === '전체' || place.category === category;
@@ -428,22 +502,46 @@ export default function App() {
     async function hydratePlaces() {
       if (!isFirebaseDbConfigured()) return;
       try {
-        const remotePlaces = await loadPlacesFromFirestore();
-        if (isMounted && remotePlaces.length > 0) {
-          setPlaces(remotePlaces);
-          setSelectedPlace(remotePlaces[0]);
-          setDetailSheetVisible(true);
-          setRoutePlaces(buildRoute(remotePlaces.slice(0, 4)));
+        const remotePlaces = await loadPlacesFromFirestore(currentWorkspaceId);
+        if (isMounted) {
+          if (remotePlaces.length > 0) {
+            setPlaces(remotePlaces);
+            setSelectedPlace(remotePlaces[0]);
+            setDetailSheetVisible(true);
+            setRoutePlaces(buildRoute(remotePlaces.slice(0, 4)));
+          } else {
+            setPlaces(initialPlaces);
+            if (initialPlaces.length > 0) {
+              setSelectedPlace(initialPlaces[0]);
+              setDetailSheetVisible(true);
+              setRoutePlaces(buildRoute(initialPlaces.slice(0, 4)));
+            }
+          }
         }
-        const remoteCollections = await loadCollectionsFromFirestore();
-        if (isMounted && remoteCollections.length > 0) {
-          setCollections(remoteCollections);
-          setSelectedCollectionId(remoteCollections[0].id);
+        const remoteCollections = await loadCollectionsFromFirestore(currentWorkspaceId);
+        if (isMounted) {
+          if (remoteCollections.length > 0) {
+            setCollections(remoteCollections);
+            setSelectedCollectionId(remoteCollections[0].id);
+          } else {
+            setCollections(starterCollections);
+            setSelectedCollectionId(starterCollections[0].id);
+          }
         }
       } catch (error) {
         console.warn('Failed to load Firestore places', error);
       }
     }
+
+    hydratePlaces();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentWorkspaceId]);
+
+  useEffect(() => {
+    let isMounted = true;
 
     async function loadLocation() {
       const { status } = await Location.requestForegroundPermissionsAsync();
@@ -462,7 +560,6 @@ export default function App() {
       }
     }
 
-    hydratePlaces();
     loadLocation().catch(() => {
       if (isMounted) setMapStatus({ status: 'location-error', message: '현재 위치를 가져오지 못했어요.' });
     });
@@ -825,21 +922,21 @@ export default function App() {
     const targetCollection = collections.find((collection) => collection.id === collectionId);
     const nextCollection = targetCollection
       ? {
-          ...targetCollection,
-          placeIds: targetCollection.placeIds.includes(place.id)
-            ? targetCollection.placeIds
-            : [place.id, ...targetCollection.placeIds],
-        }
+        ...targetCollection,
+        placeIds: targetCollection.placeIds.includes(place.id)
+          ? targetCollection.placeIds
+          : [place.id, ...targetCollection.placeIds],
+      }
       : null;
     setCollections((current) =>
       current.map((collection) =>
         collection.id === collectionId
           ? {
-              ...collection,
-              placeIds: collection.placeIds.includes(place.id)
-                ? collection.placeIds
-                : [place.id, ...collection.placeIds],
-            }
+            ...collection,
+            placeIds: collection.placeIds.includes(place.id)
+              ? collection.placeIds
+              : [place.id, ...collection.placeIds],
+          }
           : collection
       )
     );
@@ -847,29 +944,29 @@ export default function App() {
       current.map((item) =>
         item.id === place.id
           ? {
-              ...item,
-              pinColor: nextColor,
-              collectionIds: Array.from(new Set([...(item.collectionIds || []), collectionId])),
-            }
+            ...item,
+            pinColor: nextColor,
+            collectionIds: Array.from(new Set([...(item.collectionIds || []), collectionId])),
+          }
           : item
       )
     );
     setSelectedPlace((current) =>
       current?.id === place.id
         ? {
-            ...current,
-            pinColor: nextColor,
-            collectionIds: Array.from(new Set([...(current.collectionIds || []), collectionId])),
-          }
+          ...current,
+          pinColor: nextColor,
+          collectionIds: Array.from(new Set([...(current.collectionIds || []), collectionId])),
+        }
         : current
     );
     savePlaceToFirestore({
       ...place,
       pinColor: nextColor,
       collectionIds: Array.from(new Set([...(place.collectionIds || []), collectionId])),
-    }).catch(() => {});
+    }).catch(() => { });
     if (nextCollection) {
-      saveCollectionToFirestore(nextCollection).catch(() => {});
+      saveCollectionToFirestore(nextCollection).catch(() => { });
     }
     setSelectedCollectionId(collectionId);
     setCollectionPickerPlace(null);
@@ -913,34 +1010,34 @@ export default function App() {
         current.map((place) =>
           place.id === collectionPickerPlace.id
             ? {
-                ...place,
-                pinColor: nextColor,
-                collectionIds: Array.from(new Set([...(place.collectionIds || []), nextCollection.id])),
-              }
+              ...place,
+              pinColor: nextColor,
+              collectionIds: Array.from(new Set([...(place.collectionIds || []), nextCollection.id])),
+            }
             : place
         )
       );
       setSelectedPlace((current) =>
         current?.id === collectionPickerPlace.id
           ? {
-              ...current,
-              pinColor: nextColor,
-              collectionIds: Array.from(new Set([...(current.collectionIds || []), nextCollection.id])),
-            }
+            ...current,
+            pinColor: nextColor,
+            collectionIds: Array.from(new Set([...(current.collectionIds || []), nextCollection.id])),
+          }
           : current
       );
       savePlaceToFirestore({
         ...collectionPickerPlace,
         pinColor: nextColor,
         collectionIds: Array.from(new Set([...(collectionPickerPlace.collectionIds || []), nextCollection.id])),
-      }).catch(() => {});
-      saveCollectionToFirestore(nextCollection).catch(() => {});
+      }).catch(() => { });
+      saveCollectionToFirestore(nextCollection).catch(() => { });
       setCollectionPickerPlace(null);
       setCollectionCreatorOpen(false);
       showToast(`${nextCollection.name}에 저장했어요`);
       return;
     }
-    saveCollectionToFirestore(nextCollection).catch(() => {});
+    saveCollectionToFirestore(nextCollection).catch(() => { });
     setCollectionCreatorOpen(false);
     showToast(`${nextCollection.name} 생성 완료`);
   }
@@ -981,7 +1078,7 @@ export default function App() {
               pinColor: nextIds.length > 0 ? current.pinColor : '#FFFFFF',
             };
           });
-          deleteCollectionFromFirestore(removedId).catch(() => {});
+          deleteCollectionFromFirestore(removedId).catch(() => { });
           showToast('컬렉션을 삭제했어요');
         },
       },
