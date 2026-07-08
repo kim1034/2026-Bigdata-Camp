@@ -5,8 +5,6 @@ import {
   doc,
   getDocs,
   getFirestore,
-  orderBy,
-  query,
   setDoc,
 } from 'firebase/firestore';
 
@@ -58,6 +56,7 @@ function serializePlace(place) {
 
   return {
     ...place,
+    createdAt: place.createdAt || new Date().toISOString(),
     originalImage,
     updatedAt: new Date().toISOString(),
   };
@@ -109,8 +108,10 @@ export function isFirebaseDbConfigured() {
 export async function loadPlacesFromFirestore() {
   const db = getDb();
   if (!db) return [];
-  const snapshot = await getDocs(query(placesCollection(db), orderBy('createdAt', 'desc')));
-  return snapshot.docs.map((item) => normalizePlace({ id: item.id, ...item.data() }));
+  const snapshot = await getDocs(placesCollection(db));
+  return snapshot.docs
+    .map((item) => normalizePlace({ id: item.id, ...item.data() }))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
 export async function savePlaceToFirestore(place) {
@@ -122,8 +123,10 @@ export async function savePlaceToFirestore(place) {
 export async function loadCollectionsFromFirestore() {
   const db = getDb();
   if (!db) return [];
-  const snapshot = await getDocs(query(collectionsCollection(db), orderBy('createdAt', 'desc')));
-  return snapshot.docs.map((item) => normalizeCollection({ id: item.id, ...item.data() }));
+  const snapshot = await getDocs(collectionsCollection(db));
+  return snapshot.docs
+    .map((item) => normalizeCollection({ id: item.id, ...item.data() }))
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 }
 
 export async function saveCollectionToFirestore(item) {

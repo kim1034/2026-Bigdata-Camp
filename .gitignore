@@ -4,7 +4,7 @@ dist/
 coverage/
 .DS_Store
 *.log
-.env*
-!.env.example
 .expo/
 .vscode/
+.env*
+!.env.example

@@ -5,8 +5,6 @@ import {
   doc,
   getDocs,
   getFirestore,
-  orderBy,
-  query,
   setDoc,
   writeBatch,
   type Firestore,
@@ -79,6 +77,7 @@ function serializePlace(place: Place) {
 
   return {
     ...place,
+    createdAt: place.createdAt || new Date().toISOString(),
     originalImage,
     updatedAt: new Date().toISOString(),
   };
@@ -92,8 +91,10 @@ export async function loadPlacesFromFirestore(): Promise<Place[]> {
   const db = getDb();
   if (!db) return [];
 
-  const snapshot = await getDocs(query(placesCollection(db), orderBy('createdAt', 'desc')));
-  return snapshot.docs.map((item) => normalizePlace({ id: item.id, ...item.data() }));
+  const snapshot = await getDocs(placesCollection(db));
+  return snapshot.docs
+    .map((item) => normalizePlace({ id: item.id, ...item.data() }))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
 export async function savePlaceToFirestore(place: Place) {
