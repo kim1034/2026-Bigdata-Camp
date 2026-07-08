@@ -5,5 +5,9 @@ service cloud.firestore {
     match /workspaces/{workspaceId}/places/{placeId} {
       allow read, write: if true;
     }
+
+    match /workspaces/{workspaceId}/collections/{collectionId} {
+      allow read, write: if true;
+    }
   }
 }
