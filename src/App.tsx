@@ -1,19 +1,17 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { 
-  Upload, MapPin, Coffee, Utensils, Home, Compass, 
-  Trash2, Plus, X, ChevronRight, Sparkles, Clock, 
-  Search, Heart, Info, AlertCircle, Check, Map as MapIcon,
-  HelpCircle, ChevronDown, ListFilter, RotateCcw,
-  ArrowUp, ArrowDown, Share2, Copy, Calendar
+import {
+  Upload, MapPin, Coffee, Utensils, Home, Compass,
+  Trash2, X, ChevronRight, Sparkles, Clock,
+  Search, Info, AlertCircle, Check, Map as MapIcon,
+  RotateCcw, ArrowUp, ArrowDown, Share2, Copy, Calendar
 } from "lucide-react";
 
 import Map from "./components/Map";
 import { Place, CategoryType, ExtractionResult, PlaceMenu } from "./types";
-import { INITIAL_PLACES, DEMO_SCREENSHOTS } from "./data";
 
 export default function App() {
-  // Load places from localStorage, or default to initial preset places
+  // Load places from localStorage; starts empty on first run
   const [places, setPlaces] = useState<Place[]>(() => {
     const saved = localStorage.getItem("pinsnap_places");
     if (saved) {
@@ -38,7 +36,7 @@ export default function App() {
         console.error("Failed to parse saved places", e);
       }
     }
-    return INITIAL_PLACES;
+    return [];
   });
 
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
@@ -88,8 +86,6 @@ export default function App() {
     return today.toISOString().split("T")[0];
   });
   const [aiCheckedPlaces, setAiCheckedPlaces] = useState<string[]>([]);
-  const [isAiGenerating, setIsAiGenerating] = useState(false);
-  const [aiGenerationStep, setAiGenerationStep] = useState("");
   const [aiGeneratedItinerary, setAiGeneratedItinerary] = useState<ItineraryItem[] | null>(null);
   const [showAiResult, setShowAiResult] = useState(false);
 
@@ -215,140 +211,119 @@ export default function App() {
   // AI Itinerary Optimization Generator
   const runAiItineraryPlanner = () => {
     if (aiCheckedPlaces.length === 0) {
-      alert("최소 1개 이상의 장소를 지정하셔야 일정을 계획할 수 있습니다.");
+      showAlert("장소 미선택", "최소 1개 이상의 장소를 선택해야 일정을 계획할 수 있습니다.");
       return;
     }
 
-    setIsAiGenerating(true);
-    setAiGenerationStep("🤖 AI가 지정하신 장소들의 영업시간과 주소를 분석하는 중...");
+    // Generate the optimized itinerary list
+    const selectedPlaces = places.filter(p => aiCheckedPlaces.includes(p.id));
 
-    const steps = [
-      "🤖 AI가 지정하신 장소들의 영업시간과 주소를 분석하는 중...",
-      "🧭 각 목적지 간의 최적 도보 및 대중교통 동선을 계산하는 중...",
-      "⏰ 영업 종료 및 브레이크 타임을 매칭하여 방문 타임라인을 정비하는 중...",
-      "✨ 하루 가이드라인과 꿀팁을 이식한 맞춤형 AI 데일리 일정표 완성!"
-    ];
+    // Categorize
+    const cafes = selectedPlaces.filter(p => p.category === "카페");
+    const restaurants = selectedPlaces.filter(p => p.category === "식당");
+    const stays = selectedPlaces.filter(p => p.category === "펜션/숙소");
+    const attractions = selectedPlaces.filter(p => p.category === "관광지/기타");
 
-    let currentStepIndex = 0;
-    const interval = setInterval(() => {
-      currentStepIndex++;
-      if (currentStepIndex < steps.length) {
-        setAiGenerationStep(steps[currentStepIndex]);
-      } else {
-        clearInterval(interval);
-        
-        // Generate the optimized itinerary list
-        const selectedPlaces = places.filter(p => aiCheckedPlaces.includes(p.id));
-        
-        // Categorize
-        const cafes = selectedPlaces.filter(p => p.category === "카페");
-        const restaurants = selectedPlaces.filter(p => p.category === "식당");
-        const stays = selectedPlaces.filter(p => p.category === "펜션/숙소");
-        const attractions = selectedPlaces.filter(p => p.category === "관광지/기타");
+    // Chronological sort
+    const ordered: Place[] = [];
+    const attractionQueue = [...attractions];
+    const restaurantQueue = [...restaurants];
+    const cafeQueue = [...cafes];
+    const stayQueue = [...stays];
 
-        // Chronological sort
-        const ordered: Place[] = [];
-        const attractionQueue = [...attractions];
-        const restaurantQueue = [...restaurants];
-        const cafeQueue = [...cafes];
-        const stayQueue = [...stays];
+    // Interleave
+    if (attractionQueue.length > 0) ordered.push(attractionQueue.shift()!);
+    if (restaurantQueue.length > 0) ordered.push(restaurantQueue.shift()!);
+    if (cafeQueue.length > 0) ordered.push(cafeQueue.shift()!);
+    if (attractionQueue.length > 0) ordered.push(attractionQueue.shift()!);
+    if (restaurantQueue.length > 0) ordered.push(restaurantQueue.shift()!);
+    if (cafeQueue.length > 0) ordered.push(cafeQueue.shift()!);
 
-        // Interleave
-        if (attractionQueue.length > 0) ordered.push(attractionQueue.shift()!);
-        if (restaurantQueue.length > 0) ordered.push(restaurantQueue.shift()!);
-        if (cafeQueue.length > 0) ordered.push(cafeQueue.shift()!);
-        if (attractionQueue.length > 0) ordered.push(attractionQueue.shift()!);
-        if (restaurantQueue.length > 0) ordered.push(restaurantQueue.shift()!);
-        if (cafeQueue.length > 0) ordered.push(cafeQueue.shift()!);
-        
-        ordered.push(...attractionQueue, ...restaurantQueue, ...cafeQueue, ...stayQueue);
+    ordered.push(...attractionQueue, ...restaurantQueue, ...cafeQueue, ...stayQueue);
 
-        let currentTime = new Date();
-        currentTime.setHours(10, 30, 0);
+    let currentTime = new Date();
+    currentTime.setHours(10, 30, 0);
 
-        const timeline: ItineraryItem[] = [];
+    const timeline: ItineraryItem[] = [];
 
-        for (let i = 0; i < ordered.length; i++) {
-          const place = ordered[i];
-          const category = place.category;
+    for (let i = 0; i < ordered.length; i++) {
+      const place = ordered[i];
+      const category = place.category;
 
-          let activity = "방문 및 체험";
-          let duration = "1시간";
-          let tip = "인기 스팟이므로 방문하여 인증샷을 남겨보세요.";
+      let activity = "방문 및 체험";
+      let duration = "1시간";
+      let tip = "저장해 둔 리뷰 요약을 참고해 방문 시간을 조절해보세요.";
 
-          if (category === "식당") {
-            const hrs = currentTime.getHours();
-            activity = hrs < 15 ? "정갈한 한식 점심 식사" : "맛있는 식사 및 저녁 시간";
-            duration = "1시간 20분";
-            const signatureMenu = place.menu && place.menu.length > 0 && place.menu[0] ? place.menu[0].name : "메뉴";
-            tip = `대표 메뉴인 '${signatureMenu}'은(는) 웨이팅이 있을 수 있으니 이동 중 실시간 혼잡도를 확인해보세요.`;
-          } else if (category === "카페") {
-            activity = "오후 감성 카페 타임 & 디저트 힐링";
-            duration = "1시간";
-            const signatureMenu = place.menu && place.menu.length > 0 && place.menu[0] ? place.menu[0].name : "메뉴";
-            tip = `시그니처 메뉴인 '${signatureMenu}'와 함께 감성 가득한 분위기 속에서 휴식을 취하기 완벽한 타이밍입니다.`;
-          } else if (category === "펜션/숙소") {
-            activity = "체크인 및 아늑한 휴식 시간";
-            duration = "숙박";
-            tip = `고즈넉하고 프라이빗한 공간에서 하루의 동선을 여유롭게 되짚어보며 힐링하는 숙박 일정입니다.`;
-          } else if (category === "관광지/기타") {
-            activity = "여유로운 명소 관람 및 주변 산책";
-            duration = "1시간 30분";
-            tip = "대표적인 포토존이 밀집해 있는 코스입니다. 날씨와 뷰를 즐기며 천천히 산책해 보세요.";
-          }
-
-          const hoursStr = String(currentTime.getHours()).padStart(2, "0");
-          const minsStr = String(currentTime.getMinutes()).padStart(2, "0");
-          const timeStr = `${hoursStr}:${minsStr}`;
-
-          let hoursCheck = `영업시간 일치 확인 (방문 시간 ${timeStr} 기준 매장 운영 시간 내에 포함)`;
-          if (category === "펜션/숙소") {
-            hoursCheck = "체크인 가이드 확인 완료 (체크인 타임 라인 규정 준수)";
-          }
-
-          let transitToNext: ItineraryItem["transitToNext"] = null;
-          const nextPlace = ordered[i + 1];
-
-          if (nextPlace) {
-            const dist = calculateDistance(place.latitude, place.longitude, nextPlace.latitude, nextPlace.longitude);
-            const isWalk = dist < 700;
-            const speed = isWalk ? 5000 / 60 : 30000 / 60;
-            const transitMin = Math.max(2, Math.round(dist / speed));
-            const distText = dist >= 1000 ? `${(dist / 1000).toFixed(1)}km` : `${Math.round(dist)}m`;
-            const modeText = isWalk ? "🚶 도보" : "🚗 차량";
-
-            transitToNext = {
-              type: isWalk ? "walk" : "car",
-              duration: transitMin,
-              distance: dist,
-              text: `${modeText} 이동 ${transitMin}분 (${distText})`
-            };
-
-            let durationMins = 60;
-            if (duration.includes("1시간 20분")) durationMins = 80;
-            else if (duration.includes("1시간 30분")) durationMins = 90;
-            else if (duration.includes("1시간")) durationMins = 60;
-            else if (duration.includes("숙박")) durationMins = 120;
-
-            currentTime.setMinutes(currentTime.getMinutes() + durationMins + transitMin);
-          }
-
-          timeline.push({
-            place,
-            time: timeStr,
-            activity,
-            duration,
-            hoursCheck,
-            tip,
-            transitToNext
-          });
-        }
-
-        setAiGeneratedItinerary(timeline);
-        setIsAiGenerating(false);
-        setShowAiResult(true);
+      if (category === "식당") {
+        const hrs = currentTime.getHours();
+        activity = hrs < 15 ? "점심 식사" : "저녁 식사";
+        duration = "1시간 20분";
+        const signatureMenu = place.menu && place.menu.length > 0 && place.menu[0] ? place.menu[0].name : "메뉴";
+        tip = `대표 메뉴 '${signatureMenu}'은(는) 대기가 있을 수 있으니 방문 전 혼잡도를 확인해보세요.`;
+      } else if (category === "카페") {
+        activity = "카페 · 디저트";
+        duration = "1시간";
+        const signatureMenu = place.menu && place.menu.length > 0 && place.menu[0] ? place.menu[0].name : "메뉴";
+        tip = `대표 메뉴 '${signatureMenu}'와 함께 잠시 쉬어가기 좋은 시간대입니다.`;
+      } else if (category === "펜션/숙소") {
+        activity = "체크인 및 휴식";
+        duration = "숙박";
+        tip = "체크인 가능 시간을 미리 확인하고 이동하세요.";
+      } else if (category === "관광지/기타") {
+        activity = "관람 및 산책";
+        duration = "1시간 30분";
+        tip = "여유를 두고 둘러보기 좋은 코스입니다.";
       }
-    }, 600);
+
+      const hoursStr = String(currentTime.getHours()).padStart(2, "0");
+      const minsStr = String(currentTime.getMinutes()).padStart(2, "0");
+      const timeStr = `${hoursStr}:${minsStr}`;
+
+      let hoursCheck = `방문 예정 시간 ${timeStr} 기준, 등록된 영업시간과 대조해주세요`;
+      if (category === "펜션/숙소") {
+        hoursCheck = "체크인 시간 규정을 확인해주세요";
+      }
+
+      let transitToNext: ItineraryItem["transitToNext"] = null;
+      const nextPlace = ordered[i + 1];
+
+      if (nextPlace) {
+        const dist = calculateDistance(place.latitude, place.longitude, nextPlace.latitude, nextPlace.longitude);
+        const isWalk = dist < 700;
+        const speed = isWalk ? 5000 / 60 : 30000 / 60;
+        const transitMin = Math.max(2, Math.round(dist / speed));
+        const distText = dist >= 1000 ? `${(dist / 1000).toFixed(1)}km` : `${Math.round(dist)}m`;
+        const modeText = isWalk ? "도보" : "차량";
+
+        transitToNext = {
+          type: isWalk ? "walk" : "car",
+          duration: transitMin,
+          distance: dist,
+          text: `${modeText} 이동 ${transitMin}분 (${distText})`
+        };
+
+        let durationMins = 60;
+        if (duration.includes("1시간 20분")) durationMins = 80;
+        else if (duration.includes("1시간 30분")) durationMins = 90;
+        else if (duration.includes("1시간")) durationMins = 60;
+        else if (duration.includes("숙박")) durationMins = 120;
+
+        currentTime.setMinutes(currentTime.getMinutes() + durationMins + transitMin);
+      }
+
+      timeline.push({
+        place,
+        time: timeStr,
+        activity,
+        duration,
+        hoursCheck,
+        tip,
+        transitToNext
+      });
+    }
+
+    setAiGeneratedItinerary(timeline);
+    setShowAiResult(true);
   };
 
   const setPresetDate = (type: "today" | "tomorrow" | "weekend") => {
@@ -405,15 +380,15 @@ export default function App() {
   const handleCopyItinerary = () => {
     if (!aiGeneratedItinerary) return;
     
-    const header = `[핫스팟] AI 추천 ${aiSelectedRegion} 데일리 일정표 📅\n방문 예정일: ${aiSelectedDate}\nAI가 영업시간과 이동 거리를 최적화한 최상의 동선입니다!\n\n`;
+    const header = `[핫스팟] ${aiSelectedRegion} 데일리 일정표\n방문 예정일: ${aiSelectedDate}\n\n`;
     
     const body = aiGeneratedItinerary.map((item, idx) => {
-      let stepStr = `📍 [STEP ${idx + 1}] ${item.time} - ${item.place.name} (${item.place.category})\n`;
+      let stepStr = `[${idx + 1}] ${item.time} - ${item.place.name} (${item.place.category})\n`;
       stepStr += `   - 주요 활동: ${item.activity} (${item.duration})\n`;
       stepStr += `   - 영업 상태: ${item.place.hours}\n`;
-      stepStr += `   - AI 꿀팁: "${item.tip}"\n`;
+      stepStr += `   - 참고: "${item.tip}"\n`;
       if (item.transitToNext) {
-        stepStr += `\n   ▼ 다음 장소로 이동: ${item.transitToNext.text}\n`;
+        stepStr += `\n   다음 장소로 이동: ${item.transitToNext.text}\n`;
       }
       return stepStr;
     }).join("\n----------------------------------------\n\n");
@@ -438,7 +413,7 @@ export default function App() {
 
   // Share/Export Regional List
   const handleShareRegion = (region: string, regionPlaces: Place[]) => {
-    const header = `[핫스팟] ${region} 추천 장소 리스트 🗺️\n총 ${regionPlaces.length}곳의 장소 동선을 공유합니다!\n\n`;
+    const header = `[핫스팟] ${region} 장소 리스트\n총 ${regionPlaces.length}곳의 장소를 공유합니다.\n\n`;
     const body = regionPlaces.map((p, idx) => {
       const menuText = Array.isArray(p.menu) && p.menu.length > 0 
         ? p.menu.filter(m => m && m.name).map(m => `${m.name}(${m.price || '정보 없음'})`).join(", ") 
@@ -497,24 +472,7 @@ export default function App() {
     setIsExtracting(true);
     setSelectedPlace(null);
     setExtractedResult(null);
-
-    // Progressive simulated loading steps for immersive UX
-    const steps = [
-      "📷 스크린샷 이미지 업로드 중...",
-      "🔍 AI 오작동 방지 및 OCR 텍스트 분석 중...",
-      "📍 가게명 & 지역 키워드 매칭 중...",
-      "✨ Google Places API 가상 동기화 및 가공 중..."
-    ];
-
-    let currentStepIndex = 0;
-    setExtractionStep(steps[currentStepIndex]);
-
-    const progressInterval = setInterval(() => {
-      if (currentStepIndex < steps.length - 1) {
-        currentStepIndex++;
-        setExtractionStep(steps[currentStepIndex]);
-      }
-    }, 1200);
+    setExtractionStep("스크린샷에서 장소 정보를 분석하고 있습니다");
 
     try {
       const response = await fetch("/api/extract", {
@@ -524,7 +482,12 @@ export default function App() {
       });
 
       const data = await response.json();
-      clearInterval(progressInterval);
+
+      if (!response.ok) {
+        showAlert("분석 실패", data?.error || "장소 분석에 실패했습니다. 잠시 후 다시 시도해주세요.");
+        setUploadedImageBase64(null);
+        return;
+      }
 
       const safeData = data || {};
       // Set verification form states with extracted data
@@ -538,65 +501,8 @@ export default function App() {
       setVerificationScreenshotText(safeData.screenshotText || "");
     } catch (error) {
       console.error("Extraction error:", error);
-      clearInterval(progressInterval);
-      
-      // Fallback is handled server-side, but if server fails completely:
-      showAlert("서버 연결 실패", "서버 연결에 실패하여 데모 데이터를 제공합니다.");
-      setIsExtracting(false);
-    } finally {
-      setIsExtracting(false);
-    }
-  };
-
-  // Handle Demo Screenshot trigger
-  const handleDemoScreenshotClick = async (demo: typeof DEMO_SCREENSHOTS[0]) => {
-    setIsExtracting(true);
-    setSelectedPlace(null);
-    setExtractedResult(null);
-    
-    // Simulate converting a URL or utilizing direct sample
-    setUploadedImageBase64(demo.imageUrl);
-    
-    const steps = [
-      "🌟 데모 스크린샷 분석 시작...",
-      "🔍 이미지 내 텍스트(OCR) 추출 중...",
-      "📍 위치 데이터 매칭 및 카테고리 분류 중...",
-      "🎨 상세 프로필 정보 생성 중..."
-    ];
-
-    let currentStepIndex = 0;
-    setExtractionStep(steps[currentStepIndex]);
-
-    const progressInterval = setInterval(() => {
-      if (currentStepIndex < steps.length - 1) {
-        currentStepIndex++;
-        setExtractionStep(steps[currentStepIndex]);
-      }
-    }, 1000);
-
-    try {
-      // Send the image URL to mock or trigger matching
-      const response = await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: demo.imageUrl }),
-      });
-
-      const data = await response.json();
-      clearInterval(progressInterval);
-
-      const safeData = data || {};
-      setExtractedResult(safeData);
-      setVerificationName(safeData.name || "");
-      setVerificationCategory(safeData.category || "카페");
-      setVerificationAddress(safeData.address || "");
-      setVerificationHours(safeData.hours || "정보 없음");
-      setVerificationMenu(Array.isArray(safeData.menu) ? safeData.menu : []);
-      setVerificationReview(safeData.reviewSummary || "정보 없음");
-      setVerificationScreenshotText(safeData.screenshotText || "");
-    } catch (e) {
-      clearInterval(progressInterval);
-      console.error(e);
+      showAlert("서버 연결 실패", "서버에 연결할 수 없습니다. 서버 실행 상태를 확인해주세요.");
+      setUploadedImageBase64(null);
     } finally {
       setIsExtracting(false);
     }
@@ -648,14 +554,14 @@ export default function App() {
     setConfirmDeleteId(null);
   };
 
-  // Reset preset database trigger (opens custom dialog)
+  // Clear all saved places trigger (opens custom dialog)
   const handleResetPresets = () => {
     setConfirmReset(true);
   };
 
-  // Perform actual reset after confirmation
+  // Perform actual clear after confirmation
   const executeResetPresets = () => {
-    setPlaces(INITIAL_PLACES);
+    setPlaces([]);
     setSelectedPlace(null);
     setExtractedResult(null);
     localStorage.removeItem("pinsnap_places");
@@ -694,32 +600,32 @@ export default function App() {
     <div id="pinsnap-root" className="w-full h-screen flex flex-col md:flex-row bg-[#f8f9fa] font-sans select-none overflow-hidden text-[#2d3436]">
       
       {/* LEFT COLUMN: Sidebar Dashboard / Capturing Control Panel */}
-      <div id="pinsnap-sidebar" className="w-full md:w-[460px] lg:w-[500px] h-[50%] md:h-full flex flex-col bg-white border-b md:border-b-0 md:border-r border-gray-200 overflow-hidden z-30 shadow-2xl">
+      <div id="pinsnap-sidebar" className="w-full md:w-[460px] lg:w-[500px] h-[50%] md:h-full flex flex-col bg-white border-b md:border-b-0 md:border-r border-gray-200 overflow-hidden z-30">
         
         {/* Sidebar Header */}
         <div className="p-5 border-b border-gray-200 flex items-center justify-between bg-white">
           <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 bg-[#0064FF] rounded-xl flex items-center justify-center shadow-lg shadow-blue-100">
+            <div className="w-10 h-10 bg-[#0064FF] rounded-xl flex items-center justify-center shadow-sm">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
             </div>
             <div>
-              <h1 className="text-xl font-black text-[#0064FF] tracking-tight flex items-center gap-1">
+              <h1 className="text-xl font-bold text-[#0064FF] tracking-tight flex items-center gap-1">
                 핫-스팟(Hot - Spot) <span className="text-[10px] font-bold bg-blue-50 text-[#0064FF] border border-blue-150 px-1.5 py-0.5 rounded-full">SpotLog</span>
               </h1>
               <p className="text-[11px] text-gray-500 font-medium">인스타 캡처 한 장으로 끝내는 장소 지도</p>
             </div>
           </div>
 
-          <button 
+          <button
             onClick={handleResetPresets}
-            className="p-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 border border-gray-200 text-gray-500 hover:text-[#2d3436] transition-colors cursor-pointer flex items-center gap-1 text-[11px]"
-            title="기본 샘플 데이터로 초기화"
+            className="p-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 border border-gray-200 text-gray-500 hover:text-red-600 transition-colors cursor-pointer flex items-center gap-1 text-[11px]"
+            title="저장된 모든 장소 삭제"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>초기화</span>
+            <span>전체 삭제</span>
           </button>
         </div>
 
@@ -727,7 +633,7 @@ export default function App() {
         <div className="flex border-b border-gray-150 bg-gray-50/50 p-1 shrink-0">
           <button
             onClick={() => setActiveTab("my-places")}
-            className={`flex-1 py-2 rounded-xl text-[11px] font-black transition-all flex items-center justify-center gap-1 cursor-pointer ${
+            className={`flex-1 py-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
               activeTab === "my-places"
                 ? "bg-white text-[#0064FF] shadow-sm border border-gray-200"
                 : "text-gray-500 hover:text-gray-800"
@@ -738,7 +644,7 @@ export default function App() {
           </button>
           <button
             onClick={() => setActiveTab("route-planner")}
-            className={`flex-1 py-2 rounded-xl text-[11px] font-black transition-all flex items-center justify-center gap-1 cursor-pointer ${
+            className={`flex-1 py-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
               activeTab === "route-planner"
                 ? "bg-white text-[#0064FF] shadow-sm border border-gray-200"
                 : "text-gray-500 hover:text-gray-800"
@@ -749,7 +655,7 @@ export default function App() {
           </button>
           <button
             onClick={() => setActiveTab("regional-share")}
-            className={`flex-1 py-2 rounded-xl text-[11px] font-black transition-all flex items-center justify-center gap-1 cursor-pointer ${
+            className={`flex-1 py-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
               activeTab === "regional-share"
                 ? "bg-white text-[#0064FF] shadow-sm border border-gray-200"
                 : "text-gray-500 hover:text-gray-800"
@@ -760,13 +666,13 @@ export default function App() {
           </button>
           <button
             onClick={() => setActiveTab("ai-itinerary")}
-            className={`flex-1 py-2 rounded-xl text-[11px] font-black transition-all flex items-center justify-center gap-1 cursor-pointer ${
+            className={`flex-1 py-2 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer ${
               activeTab === "ai-itinerary"
                 ? "bg-white text-[#0064FF] shadow-sm border border-gray-200"
                 : "text-gray-500 hover:text-gray-800"
             }`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
+            <Sparkles className="w-3.5 h-3.5" />
             AI 일정 짜기
           </button>
         </div>
@@ -783,7 +689,6 @@ export default function App() {
                     <Upload className="w-4 h-4 text-[#0064FF]" />
                     장소 캡처 이미지 업로드
                   </h3>
-                  <span className="text-[11px] text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-200 font-medium">업로드</span>
                 </div>
 
                 {/* Drag & Drop File Upload Trigger Area */}
@@ -813,36 +718,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Quick Demo Screenshot Presets (Crucial for testing instant UX!) */}
-                <div className="bg-white rounded-2xl p-4 border border-gray-150 space-y-3 shadow-sm">
-                  <p className="text-[11px] font-bold text-gray-600 flex items-center gap-1">
-                    <Sparkles className="w-3.5 h-3.5 text-[#0064FF]" />
-                    원클릭 데모 캡처로 즉시 테스트 해보세요:
-                  </p>
-                  <div className="grid grid-cols-1 gap-2">
-                    {DEMO_SCREENSHOTS.map((demo, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => handleDemoScreenshotClick(demo)}
-                        className="w-full text-left p-2 rounded-xl bg-[#f8f9fa] hover:bg-white border border-gray-150 hover:border-[#0064FF] flex items-center gap-2.5 transition-all text-xs text-gray-700 cursor-pointer group"
-                      >
-                        <img 
-                          src={demo.imageUrl} 
-                          alt={demo.name}
-                          className="w-10 h-10 rounded-lg object-cover border border-gray-200 group-hover:scale-105 transition-transform" 
-                          referrerPolicy="no-referrer"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <p className="font-bold text-gray-800 group-hover:text-[#0064FF] transition-colors truncate">
-                            {demo.name}
-                          </p>
-                          <p className="text-[10px] text-gray-400 font-medium truncate mt-0.5">{demo.promptHint}</p>
-                        </div>
-                        <ChevronRight className="w-3.5 h-3.5 text-gray-400 group-hover:text-[#0064FF] group-hover:translate-x-0.5 transition-all" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
               </div>
 
               {/* Section 2: My Places List with Filter & Search */}
@@ -852,7 +727,6 @@ export default function App() {
                     <MapIcon className="w-4 h-4 text-[#0064FF]" />
                     나의 저장된 장소들 ({filteredPlaces.length})
                   </h3>
-                  <span className="text-[10px] text-gray-400 font-mono font-bold">LOCAL STORAGE</span>
                 </div>
 
                 {/* Search Input */}
@@ -885,7 +759,7 @@ export default function App() {
                         onClick={() => setActiveCategoryFilter(filter)}
                         className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                           isActive 
-                            ? "bg-[#0064FF] text-white shadow-md shadow-blue-100 border-[#0064FF]" 
+                            ? "bg-[#0064FF] text-white shadow-sm border-[#0064FF]" 
                             : "bg-white hover:bg-gray-50 text-gray-500 hover:text-gray-800 border border-gray-200"
                         }`}
                       >
@@ -914,7 +788,7 @@ export default function App() {
                           onClick={() => setSelectedPlace(place)}
                           className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex gap-3 relative group ${
                             isSelected 
-                              ? "bg-white border-[#0064FF] shadow-lg shadow-blue-50/50 ring-1 ring-[#0064FF]" 
+                              ? "bg-white border-[#0064FF] shadow-sm ring-1 ring-[#0064FF]" 
                               : "bg-white hover:bg-gray-50 border-gray-200/80 hover:border-gray-300"
                           }`}
                         >
@@ -935,7 +809,7 @@ export default function App() {
                             {place.menu && place.menu.length > 0 && place.menu[0] && (
                               <div className="mt-1.5 flex items-center gap-1 flex-wrap">
                                 <span className="text-[9px] bg-gray-50 text-gray-600 px-1.5 py-0.5 rounded border border-gray-150">
-                                  🍰 {place.menu[0].name || "대표 메뉴"} {place.menu[0].price ? `(${place.menu[0].price})` : ""}
+                                  {place.menu[0].name || "대표 메뉴"} {place.menu[0].price ? `(${place.menu[0].price})` : ""}
                                 </span>
                               </div>
                             )}
@@ -997,7 +871,7 @@ export default function App() {
                       onClick={() => setIsDrawingZone(!isDrawingZone)}
                       className={`w-full py-3 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer ${
                         isDrawingZone
-                          ? "bg-amber-500 text-white shadow-lg shadow-amber-100 animate-pulse"
+                          ? "bg-amber-500 text-white shadow-sm"
                           : "bg-[#0064FF] hover:bg-[#0050CC] text-white shadow-md shadow-blue-100"
                       }`}
                     >
@@ -1024,14 +898,14 @@ export default function App() {
                     <div className="space-y-1.5">
                       <div className="flex justify-between items-center">
                         <span className="text-[11px] font-bold text-gray-600">동선 검색 반경</span>
-                        <span className="text-xs font-black text-[#0064FF]">{circleRadius >= 1000 ? `${(circleRadius/1000).toFixed(1)}km` : `${circleRadius}m`}</span>
+                        <span className="text-xs font-bold text-[#0064FF]">{circleRadius >= 1000 ? `${(circleRadius/1000).toFixed(1)}km` : `${circleRadius}m`}</span>
                       </div>
                       <div className="grid grid-cols-4 gap-1.5">
                         {[500, 800, 1200, 2000].map((r) => (
                           <button
                             key={r}
                             onClick={() => setCircleRadius(r)}
-                            className={`py-1.5 rounded-lg text-[10px] font-black transition-all cursor-pointer border ${
+                            className={`py-1.5 rounded-lg text-[10px] font-bold transition-all cursor-pointer border ${
                               circleRadius === r
                                 ? "bg-[#0064FF] border-[#0064FF] text-white shadow-sm"
                                 : "bg-white border-gray-200 text-gray-500 hover:bg-gray-50"
@@ -1052,7 +926,7 @@ export default function App() {
                   <span className="text-xs font-bold text-gray-800">2단계: 방문 순서 지정 ({routePlaces.length}곳 묶임)</span>
                   {routePlaces.length >= 2 && (
                     <span className="text-[10px] text-gray-400 font-bold bg-white px-2 py-0.5 rounded-full border border-gray-150">
-                      지도에 경로 실선 표시 중 ⚡
+                      지도에 경로 표시 중
                     </span>
                   )}
                 </div>
@@ -1080,7 +954,7 @@ export default function App() {
                           className="bg-white border border-gray-150 rounded-2xl p-3 flex items-center gap-3 shadow-sm hover:border-gray-300 transition-all"
                         >
                           {/* Visitation Index marker */}
-                          <div className="w-6 h-6 rounded-full bg-black text-white text-xs font-black flex items-center justify-center shrink-0">
+                          <div className="w-6 h-6 rounded-full bg-black text-white text-xs font-bold flex items-center justify-center shrink-0">
                             {index + 1}
                           </div>
 
@@ -1151,8 +1025,8 @@ export default function App() {
                         {/* Title and Badge */}
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-1.5">
-                            <span className="text-base">📍</span>
-                            <h4 className="font-black text-sm text-gray-800">{region}</h4>
+                            <MapPin className="w-4 h-4 text-[#0064FF]" />
+                            <h4 className="font-bold text-sm text-gray-800">{region}</h4>
                           </div>
                           <span className="text-[10px] bg-blue-50 text-[#0064FF] border border-blue-100 px-2.5 py-0.5 rounded-full font-bold">
                             스팟 {regionPlaces.length}개
@@ -1163,7 +1037,6 @@ export default function App() {
                         <div className="space-y-1.5 border-l-2 border-gray-100 pl-2">
                           {regionPlaces.map((p) => (
                             <div key={p.id} className="text-[11px] flex items-center gap-1.5 text-gray-600">
-                              <span>🏡</span>
                               <span className="font-bold text-gray-800 truncate">{p.name}</span>
                               <span className="text-[9px] text-gray-400">({p.category})</span>
                             </div>
@@ -1173,7 +1046,7 @@ export default function App() {
                         {/* Export Button */}
                         <button
                           onClick={() => handleShareRegion(region, regionPlaces)}
-                          className="w-full py-2.5 bg-gray-50 hover:bg-[#0064FF]/10 text-gray-700 hover:text-[#0064FF] border border-gray-200 hover:border-[#0064FF]/20 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                          className="w-full py-2.5 bg-gray-50 hover:bg-[#0064FF]/10 text-gray-700 hover:text-[#0064FF] border border-gray-200 hover:border-[#0064FF]/20 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                         >
                           <Copy className="w-3.5 h-3.5" />
                           <span>이 지역 목록 텍스트로 내보내기 (공유)</span>
@@ -1191,38 +1064,22 @@ export default function App() {
               {/* Header Info */}
               <div className="space-y-1">
                 <h3 className="text-xs font-bold text-gray-700 tracking-wider uppercase flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-amber-500 animate-pulse" />
-                  AI 최적 데일리 일정 플래너 (Beta)
+                  <Sparkles className="w-4 h-4 text-[#0064FF]" />
+                  일정 플래너
                 </h3>
                 <p className="text-[11px] text-gray-500 leading-relaxed font-medium">
-                  지정한 스팟들의 영업시간과 주소를 분석해 최적의 방문 순서와 타임라인, 이동 수단 및 이동 시간을 계산하여 완벽한 일정을 짜줍니다.
+                  선택한 장소들의 카테고리와 위치를 기반으로 방문 순서, 타임라인, 이동 시간을 계산해 하루 일정을 구성합니다.
                 </p>
               </div>
 
-              {/* Loader */}
-              {isAiGenerating && (
-                <div className="bg-white rounded-3xl p-6 border border-gray-150 shadow-md text-center space-y-4">
-                  <div className="relative w-16 h-16 mx-auto flex items-center justify-center">
-                    <div className="absolute inset-0 rounded-full border-4 border-amber-100 border-t-amber-500 animate-spin" />
-                    <Sparkles className="w-6 h-6 text-amber-500 animate-pulse" />
-                  </div>
-                  <div className="space-y-1.5 px-2">
-                    <h4 className="text-xs font-black text-gray-800">AI 엔진 가동 중...</h4>
-                    <p className="text-[11px] text-[#0064FF] font-bold leading-relaxed animate-pulse">
-                      {aiGenerationStep}
-                    </p>
-                  </div>
-                </div>
-              )}
-
               {/* Form Config */}
-              {!isAiGenerating && !showAiResult && (
+              {!showAiResult && (
                 <div className="space-y-4">
                   <div className="bg-white rounded-2xl p-4 border border-gray-150 space-y-4 shadow-sm">
                     {/* Setup Region */}
                     <div className="space-y-1.5">
-                      <label className="text-xs font-black text-gray-800 flex items-center gap-1">
-                        <span>📍 1단계: 방문할 지역 선택</span>
+                      <label className="text-xs font-bold text-gray-800 flex items-center gap-1">
+                        <span>1단계: 방문할 지역 선택</span>
                       </label>
                       <select
                         value={aiSelectedRegion}
@@ -1243,8 +1100,8 @@ export default function App() {
 
                     {/* Setup Date */}
                     <div className="space-y-1.5">
-                      <label className="text-xs font-black text-gray-800 flex items-center gap-1">
-                        <span>📅 2단계: 방문 일정 지정</span>
+                      <label className="text-xs font-bold text-gray-800 flex items-center gap-1">
+                        <span>2단계: 방문 일정 지정</span>
                       </label>
                       <input
                         type="date"
@@ -1255,19 +1112,19 @@ export default function App() {
                       <div className="grid grid-cols-3 gap-1.5">
                         <button
                           onClick={() => setPresetDate("today")}
-                          className="py-1.5 rounded-lg text-[10px] font-black border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
+                          className="py-1.5 rounded-lg text-[10px] font-bold border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
                         >
                           오늘
                         </button>
                         <button
                           onClick={() => setPresetDate("tomorrow")}
-                          className="py-1.5 rounded-lg text-[10px] font-black border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
+                          className="py-1.5 rounded-lg text-[10px] font-bold border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
                         >
                           내일
                         </button>
                         <button
                           onClick={() => setPresetDate("weekend")}
-                          className="py-1.5 rounded-lg text-[10px] font-black border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
+                          className="py-1.5 rounded-lg text-[10px] font-bold border border-gray-200 text-gray-500 hover:bg-gray-50 cursor-pointer"
                         >
                           이번주 주말
                         </button>
@@ -1352,16 +1209,16 @@ export default function App() {
                   <button
                     onClick={runAiItineraryPlanner}
                     disabled={aiCheckedPlaces.length === 0}
-                    className="w-full py-3.5 bg-gradient-to-r from-sky-500 via-[#0064FF] to-indigo-600 hover:brightness-105 disabled:brightness-95 disabled:opacity-50 text-white rounded-2xl text-xs font-black shadow-lg shadow-blue-100 transition-all flex items-center justify-center gap-2 cursor-pointer border-none"
+                    className="w-full py-3.5 bg-[#0064FF] hover:bg-[#0050CC] disabled:hover:bg-[#0064FF] disabled:opacity-50 text-white rounded-2xl text-xs font-bold shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer border-none"
                   >
-                    <Sparkles className="w-4 h-4 animate-pulse" />
+                    <Sparkles className="w-4 h-4" />
                     <span>AI 최적 하루 일정 생성하기</span>
                   </button>
                 </div>
               )}
 
               {/* Show Generated Timeline */}
-              {!isAiGenerating && showAiResult && aiGeneratedItinerary && (
+              {showAiResult && aiGeneratedItinerary && (
                 <div className="space-y-4">
                   {/* Results Top Panel */}
                   <div className="flex items-center justify-between">
@@ -1369,16 +1226,16 @@ export default function App() {
                       onClick={() => {
                         setShowAiResult(false);
                       }}
-                      className="text-[11px] font-black text-gray-500 hover:text-gray-800 flex items-center gap-0.5 cursor-pointer"
+                      className="text-[11px] font-bold text-gray-500 hover:text-gray-800 flex items-center gap-0.5 cursor-pointer"
                     >
                       <span>← 다시 조건 수정하기</span>
                     </button>
                     <span className="text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded-full">
-                      AI 동선 정렬 완료 ⚡
+                      동선 정렬 완료
                     </span>
                   </div>
 
-                  <div className="bg-white rounded-3xl p-4 border border-gray-150 shadow-sm space-y-4">
+                  <div className="bg-white rounded-2xl p-4 border border-gray-150 shadow-sm space-y-4">
                     {/* Schedule Card Title */}
                     <div className="flex items-center gap-2 bg-gradient-to-r from-sky-50 to-blue-50/50 p-2.5 rounded-2xl border border-sky-100">
                       <Calendar className="w-4 h-4 text-amber-500" />
@@ -1398,7 +1255,7 @@ export default function App() {
                         return (
                           <div key={item.place.id} className="relative space-y-2 pl-4">
                             {/* Marker dot */}
-                            <div className="absolute -left-6.5 top-1.5 w-5 h-5 rounded-full bg-slate-900 border-2 border-white text-white text-[9px] font-black flex items-center justify-center z-10 shadow shadow-slate-300">
+                            <div className="absolute -left-6.5 top-1.5 w-5 h-5 rounded-full bg-slate-900 border-2 border-white text-white text-[9px] font-bold flex items-center justify-center z-10 shadow shadow-slate-300">
                               {index + 1}
                             </div>
 
@@ -1417,35 +1274,32 @@ export default function App() {
 
                               {/* Spot Info */}
                               <div>
-                                <h5 className="text-xs font-black text-gray-800 truncate">{item.place.name}</h5>
+                                <h5 className="text-xs font-bold text-gray-800 truncate">{item.place.name}</h5>
                                 <p className="text-[10px] text-gray-500 truncate mt-0.5">{item.place.address}</p>
                               </div>
 
                               {/* Activity Label */}
-                              <div className="bg-white px-2.5 py-1.5 rounded-xl border border-gray-150 flex items-center gap-1.5">
-                                <span className="text-[11px]">⚡</span>
+                              <div className="bg-white px-2.5 py-1.5 rounded-xl border border-gray-150">
                                 <span className="text-[10px] font-bold text-gray-700">{item.activity}</span>
                               </div>
 
                               {/* AI Tip block */}
-                              <div className="bg-amber-50/60 border border-amber-200/50 rounded-xl p-2.5 flex items-start gap-1.5">
-                                <span className="text-xs shrink-0">💡</span>
-                                <p className="text-[10px] text-amber-800 font-medium leading-relaxed">
-                                  <strong>AI 팁:</strong> {item.tip}
+                              <div className="bg-blue-50/50 border border-blue-100 rounded-xl p-2.5">
+                                <p className="text-[10px] text-gray-600 font-medium leading-relaxed">
+                                  <strong>참고:</strong> {item.tip}
                                 </p>
                               </div>
 
                               {/* Hours Check status */}
                               <div className="text-[9px] text-emerald-600 font-bold flex items-center gap-1 pl-0.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
                                 <span>{item.hoursCheck}</span>
                               </div>
                             </div>
 
                             {/* Transit section (placed after the item card, if there is a next step) */}
                             {item.transitToNext && (
-                              <div className="flex items-center gap-1.5 pl-3 py-1 bg-slate-50/50 border border-dashed border-slate-200 rounded-xl text-[10px] font-bold text-[#0064FF] max-w-max">
-                                <span>🚙</span>
+                              <div className="flex items-center gap-1.5 px-3 py-1 bg-slate-50/50 border border-dashed border-slate-200 rounded-xl text-[10px] font-bold text-[#0064FF] max-w-max">
                                 <span>{item.transitToNext.text}</span>
                               </div>
                             )}
@@ -1457,7 +1311,7 @@ export default function App() {
                     {/* Timeline Export Copy */}
                     <button
                       onClick={handleCopyItinerary}
-                      className="w-full py-3 bg-[#0064FF] hover:bg-[#0050CC] text-white rounded-xl text-xs font-black shadow-md shadow-blue-100 transition-all flex items-center justify-center gap-2 cursor-pointer border-none"
+                      className="w-full py-3 bg-[#0064FF] hover:bg-[#0050CC] text-white rounded-xl text-xs font-bold shadow-md shadow-blue-100 transition-all flex items-center justify-center gap-2 cursor-pointer border-none"
                     >
                       <Copy className="w-3.5 h-3.5" />
                       <span>이 AI 일정표 전체 복사 (공유)</span>
@@ -1521,35 +1375,18 @@ export default function App() {
 
             {/* Bottom Floating Bar inside phone: Quick Tips on how to save */}
             {places.length === 0 && !isExtracting && !extractedResult && (
-              <div className="absolute top-14 left-4 right-4 z-20 bg-white/90 backdrop-blur-md p-3.5 rounded-2xl border border-blue-100 shadow-lg text-slate-800 flex gap-2.5 items-start">
+              <div className="absolute top-14 left-4 right-4 z-20 bg-white/90 backdrop-blur-md p-3.5 rounded-2xl border border-blue-100 shadow-sm text-slate-800 flex gap-2.5 items-start">
                 <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center shrink-0 border border-blue-100">
-                  <Sparkles className="w-4 h-4 text-[#0064FF] animate-spin" />
+                  <MapPin className="w-4 h-4 text-[#0064FF]" />
                 </div>
                 <div>
-                  <h4 className="text-[11px] font-bold text-[#0064FF]">지도에 장소가 없나요?</h4>
+                  <h4 className="text-[11px] font-bold text-[#0064FF]">저장된 장소가 없습니다</h4>
                   <p className="text-[10px] text-gray-600 leading-relaxed mt-0.5 font-medium">
-                    왼쪽 패널에서 스크린샷 파일을 업로드하거나, <strong>데모 캡처</strong>를 탭하면 AI가 자동으로 이 지도에 이식해 드립니다!
+                    왼쪽 패널에서 스크린샷을 업로드하면 장소가 자동으로 분석되어 지도에 표시됩니다.
                   </p>
                 </div>
               </div>
             )}
-
-            {/* Floating Top search bar overlay (iOS Styled search widget) */}
-            <div className="absolute top-4 left-4 right-4 z-20 pointer-events-auto">
-              <div className="bg-white/95 backdrop-blur shadow-md rounded-2xl border border-gray-150 p-2.5 flex items-center gap-2">
-                <Search className="w-4 h-4 text-gray-400 shrink-0" />
-                <input
-                  type="text"
-                  placeholder="지도로 직접 장소 탐색..."
-                  className="w-full text-xs bg-transparent border-0 focus:outline-none placeholder-gray-400 text-gray-800"
-                  readOnly
-                  onClick={() => showAlert("알림", "MVP 버전에서는 왼쪽 '캡처 이미지 업로드'를 통해 지도를 생성하고 탐색할 수 있습니다.")}
-                />
-                <div className="w-6 h-6 rounded-lg bg-gray-100 flex items-center justify-center">
-                  <ListFilter className="w-3.5 h-3.5 text-gray-500" />
-                </div>
-              </div>
-            </div>
 
             {/* Share Toast Notification Alert (iOS style banner) */}
             <AnimatePresence>
@@ -1561,7 +1398,7 @@ export default function App() {
                   className="absolute top-20 left-4 right-4 z-50 bg-[#0064FF] text-white p-3.5 rounded-2xl shadow-xl border border-blue-400 flex items-center gap-3 pointer-events-auto"
                 >
                   <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center shrink-0">
-                    <Check className="w-4 h-4 text-white animate-pulse" />
+                    <Check className="w-4 h-4 text-white" />
                   </div>
                   <div className="flex-1 min-w-0">
                     <h4 className="text-[11px] font-bold text-white">[{showShareToast}] 목록 복사 완료!</h4>
@@ -1582,11 +1419,11 @@ export default function App() {
                 >
                   <div className="w-16 h-16 relative flex items-center justify-center mb-4">
                     <div className="absolute inset-0 rounded-full border-4 border-white/20 border-t-[#0064FF] animate-spin"></div>
-                    <Sparkles className="w-6 h-6 text-[#0064FF] animate-pulse" />
+                    <Sparkles className="w-6 h-6 text-[#0064FF]" />
                   </div>
                   
-                  <h3 className="text-sm font-bold text-white tracking-tight">스팟로그 AI 분석 중</h3>
-                  <p className="text-xs text-gray-200 mt-2 font-medium max-w-[260px] animate-pulse">
+                  <h3 className="text-sm font-bold text-white tracking-tight">장소 분석 중</h3>
+                  <p className="text-xs text-gray-200 mt-2 font-medium max-w-[260px]">
                     {extractionStep}
                   </p>
                   
@@ -1614,7 +1451,7 @@ export default function App() {
                   <div className="flex-1 overflow-y-auto px-5 pb-6 space-y-4">
                     <div className="flex items-center gap-2">
                       <div className="p-1 rounded-lg bg-blue-50 border border-blue-100">
-                        <Sparkles className="w-4 h-4 text-[#0064FF] animate-bounce" />
+                        <Sparkles className="w-4 h-4 text-[#0064FF]" />
                       </div>
                       <h3 className="text-sm font-bold text-gray-800">이 장소가 맞나요?</h3>
                       <span className="text-[10px] bg-emerald-50 text-emerald-700 px-1.5 py-0.5 border border-emerald-100 rounded-full font-semibold ml-auto shrink-0">
@@ -1634,7 +1471,7 @@ export default function App() {
                       )}
                       <div className="flex-1 min-w-0 flex flex-col justify-between">
                         <span className="text-[9px] font-bold text-gray-400 tracking-wider uppercase">추출된 이미지 메타데이터</span>
-                        <div className="bg-[#FFF9C4] border border-yellow-200 p-1.5 rounded-lg text-[10px] text-yellow-900 font-mono line-clamp-3 overflow-hidden leading-relaxed">
+                        <div className="bg-gray-50 border border-gray-200 p-1.5 rounded-lg text-[10px] text-gray-600 font-mono line-clamp-3 overflow-hidden leading-relaxed">
                           {verificationScreenshotText || "텍스트 인식 실패"}
                         </div>
                       </div>
@@ -1662,10 +1499,10 @@ export default function App() {
                             onChange={(e) => setVerificationCategory(e.target.value as CategoryType)}
                             className="w-full px-2.5 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-750 focus:outline-none focus:border-[#0064FF] focus:bg-white"
                           >
-                            <option value="카페">☕ 카페</option>
-                            <option value="식당">🍴 식당</option>
-                            <option value="펜션/숙소">🏡 펜션/숙소</option>
-                            <option value="관광지/기타">🗺️ 관광지/기타</option>
+                            <option value="카페">카페</option>
+                            <option value="식당">식당</option>
+                            <option value="펜션/숙소">펜션/숙소</option>
+                            <option value="관광지/기타">관광지/기타</option>
                           </select>
                         </div>
 
@@ -1746,7 +1583,7 @@ export default function App() {
                       </button>
                       <button
                         onClick={handleSavePlace}
-                        className="flex-1.5 py-3 text-xs font-bold bg-[#0064FF] hover:bg-[#0050CC] text-white rounded-2xl shadow-lg shadow-blue-100/50 flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                        className="flex-1.5 py-3 text-xs font-bold bg-[#0064FF] hover:bg-[#0050CC] text-white rounded-2xl shadow-sm flex items-center justify-center gap-1 cursor-pointer transition-colors"
                       >
                         <Check className="w-4 h-4" />
                         <span>지도에 저장하기</span>
@@ -1830,7 +1667,7 @@ export default function App() {
                             {selectedPlace.menu.map((menuItem, idx) => (
                               <div key={idx} className="bg-gray-50 border border-gray-100/80 p-2.5 rounded-xl flex justify-between items-center text-xs">
                                 <span className="font-bold text-gray-800">{menuItem.name}</span>
-                                <span className="font-black text-[#0064FF]">{menuItem.price}</span>
+                                <span className="font-bold text-[#0064FF]">{menuItem.price}</span>
                               </div>
                             ))}
                           </div>
@@ -1840,8 +1677,8 @@ export default function App() {
                       {/* Social reviews block */}
                       <div className="bg-blue-50/40 border border-blue-100/40 rounded-2xl p-3.5 space-y-1.5">
                         <div className="flex items-center gap-1">
-                          <Sparkles className="w-4 h-4 text-[#0064FF] animate-spin" />
-                          <span className="text-[10px] font-black text-[#0064FF]">AI SNS 리뷰 핵심 요약</span>
+                          <Sparkles className="w-4 h-4 text-[#0064FF]" />
+                          <span className="text-[10px] font-bold text-[#0064FF]">AI SNS 리뷰 핵심 요약</span>
                         </div>
                         <p className="text-[11px] text-gray-700 leading-relaxed font-bold">
                           "{selectedPlace.reviewSummary}"
@@ -1903,13 +1740,13 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="bg-white rounded-[28px] max-w-sm w-full p-6 shadow-2xl border border-gray-150 flex flex-col items-center text-center space-y-4"
+              className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-gray-150 flex flex-col items-center text-center space-y-4"
             >
               <div className="w-12 h-12 rounded-full bg-red-50 flex items-center justify-center border border-red-100 shrink-0">
                 <Trash2 className="w-5 h-5 text-[#0064FF]" />
               </div>
               <div className="space-y-1.5">
-                <h3 className="text-base font-black text-gray-800">장소 삭제</h3>
+                <h3 className="text-base font-bold text-gray-800">장소 삭제</h3>
                 <p className="text-xs text-gray-500 font-medium leading-relaxed">
                   이 장소를 내 스팟 목록과 지도에서 정말 삭제하시겠습니까?
                 </p>
@@ -1923,7 +1760,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => executeDeletePlace(confirmDeleteId)}
-                  className="flex-1.5 py-3 text-xs font-bold bg-red-500 hover:bg-red-600 text-white rounded-2xl cursor-pointer transition-colors shadow-lg shadow-red-200"
+                  className="flex-1.5 py-3 text-xs font-bold bg-red-500 hover:bg-red-600 text-white rounded-2xl cursor-pointer transition-colors shadow-sm"
                 >
                   삭제하기
                 </button>
@@ -1938,15 +1775,15 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="bg-white rounded-[28px] max-w-sm w-full p-6 shadow-2xl border border-gray-150 flex flex-col items-center text-center space-y-4"
+              className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-gray-150 flex flex-col items-center text-center space-y-4"
             >
               <div className="w-12 h-12 rounded-full bg-amber-50 flex items-center justify-center border border-amber-100 shrink-0">
                 <RotateCcw className="w-5 h-5 text-amber-500" />
               </div>
               <div className="space-y-1.5">
-                <h3 className="text-base font-black text-gray-800">데이터 초기화</h3>
+                <h3 className="text-base font-bold text-gray-800">전체 삭제</h3>
                 <p className="text-xs text-gray-500 font-medium leading-relaxed">
-                  저장된 모든 장소를 기본 샘플 데이터로 복원하시겠습니까? 추가하신 모든 장소는 지워집니다.
+                  저장된 모든 장소를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.
                 </p>
               </div>
               <div className="flex gap-2.5 w-full pt-2">
@@ -1958,7 +1795,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={executeResetPresets}
-                  className="flex-1.5 py-3 text-xs font-bold bg-red-500 hover:bg-red-600 text-white rounded-2xl cursor-pointer transition-colors shadow-lg shadow-red-200"
+                  className="flex-1.5 py-3 text-xs font-bold bg-red-500 hover:bg-red-600 text-white rounded-2xl cursor-pointer transition-colors shadow-sm"
                 >
                   초기화 실행
                 </button>
@@ -1973,13 +1810,13 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="bg-white rounded-[28px] max-w-sm w-full p-6 shadow-2xl border border-gray-150 flex flex-col items-center text-center space-y-4"
+              className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-gray-150 flex flex-col items-center text-center space-y-4"
             >
               <div className="w-12 h-12 rounded-full bg-blue-50 flex items-center justify-center border border-blue-100 shrink-0">
                 <AlertCircle className="w-5 h-5 text-[#0064FF]" />
               </div>
               <div className="space-y-1.5">
-                <h3 className="text-base font-black text-gray-800">{customAlert.title}</h3>
+                <h3 className="text-base font-bold text-gray-800">{customAlert.title}</h3>
                 <p className="text-xs text-gray-500 font-medium leading-relaxed">
                   {customAlert.message}
                 </p>

@@ -186,7 +186,7 @@ export default function Map({
             
             <!-- Visitation route order bubble if routing active -->
             ${isRouting ? `
-              <div class="absolute -top-2.5 -right-2.5 w-5 h-5 bg-black text-white text-[10px] font-black rounded-full border border-white flex items-center justify-center shadow-md animate-bounce">
+              <div class="absolute -top-2.5 -right-2.5 w-5 h-5 bg-black text-white text-[10px] font-bold rounded-full border border-white flex items-center justify-center shadow-md">
                 ${routeIndex + 1}
               </div>
             ` : ''}
@@ -277,13 +277,13 @@ export default function Map({
       {/* Map Element */}
       <div id="capture-map" ref={mapContainerRef} className="w-full h-full z-10" />
 
-      {/* Styled Grid Backdrop or watermark for the map */}
-      <div className="absolute top-4 left-4 z-20 pointer-events-none bg-white/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-slate-200 shadow-sm flex items-center gap-1.5">
-        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-        <span className="text-xs font-semibold text-slate-700">
-          {circleCenter ? "동선 구역 편집 모드" : "실시간 지도 모드"}
-        </span>
-      </div>
+      {/* Zone-editing mode indicator (hidden in normal browsing) */}
+      {circleCenter && (
+        <div className="absolute top-4 left-4 z-20 pointer-events-none bg-white/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-slate-200 shadow-sm flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-[#0064FF]"></span>
+          <span className="text-xs font-semibold text-slate-700">구역 지정 모드</span>
+        </div>
+      )}
     </div>
   );
 }
