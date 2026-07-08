@@ -15,9 +15,9 @@ import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { GoogleMapWebView } from './src/components/GoogleMapWebView';
-import { categories, demoScreenshots, demoTexts, initialPlaces } from './src/data/places';
+import { categories } from './src/data/places';
 import { isFirebaseDbConfigured, loadPlacesFromFirestore, savePlaceToFirestore } from './src/services/firebaseDb';
-import { buildRoute, inferPlaceFromImagePayload, inferPlaceFromText, routeLegs } from './src/utils/inference';
+import { buildRoute, routeLegs } from './src/utils/inference';
 import { styles } from './src/styles';
 
 function Glass({ children, style }) {
@@ -52,7 +52,7 @@ function normalizeMenu(menu) {
 }
 
 function normalizeExtractedPlace(payload, fallbackImage) {
-  const source = payload?.place || payload || inferPlaceFromImagePayload(fallbackImage);
+  const source = payload?.place || payload || {};
   return {
     ...source,
     menu: normalizeMenu(source.menu),
@@ -63,18 +63,17 @@ function normalizeExtractedPlace(payload, fallbackImage) {
 export default function App() {
   const mapRef = useRef(null);
   const [tab, setTab] = useState('map');
-  const [places, setPlaces] = useState(initialPlaces);
-  const [selectedPlace, setSelectedPlace] = useState(initialPlaces[0]);
-  const [detailSheetVisible, setDetailSheetVisible] = useState(true);
+  const [places, setPlaces] = useState([]);
+  const [selectedPlace, setSelectedPlace] = useState(null);
+  const [detailSheetVisible, setDetailSheetVisible] = useState(false);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('전체');
-  const [extractText, setExtractText] = useState(demoTexts[0]);
   const [extracting, setExtracting] = useState(false);
   const [extractStep, setExtractStep] = useState('');
   const [uploadedImage, setUploadedImage] = useState(null);
   const [extractResult, setExtractResult] = useState(null);
   const [verification, setVerification] = useState(null);
-  const [routePlaces, setRoutePlaces] = useState(buildRoute(initialPlaces.slice(0, 4)));
+  const [routePlaces, setRoutePlaces] = useState([]);
   const [toast, setToast] = useState('');
   const [userLocation, setUserLocation] = useState(null);
   const [mapStatus, setMapStatus] = useState({ status: 'idle', message: '' });
@@ -90,7 +89,7 @@ export default function App() {
   }, [places, category, query]);
 
   const mapPlaces = useMemo(() => visiblePlaces.map(enrichPlace), [visiblePlaces]);
-  const mapSelectedPlace = useMemo(() => enrichPlace(selectedPlace), [selectedPlace]);
+  const mapSelectedPlace = useMemo(() => (selectedPlace ? enrichPlace(selectedPlace) : null), [selectedPlace]);
   const legs = useMemo(() => routeLegs(routePlaces), [routePlaces]);
 
   useEffect(() => {
@@ -143,18 +142,6 @@ export default function App() {
     setTimeout(() => setToast(''), 1700);
   }
 
-  async function runTextExtraction(text = extractText) {
-    setExtracting(true);
-    setExtractStep('캡션 텍스트에서 장소 후보를 분석 중...');
-    setExtractResult(null);
-    setVerification(null);
-    await new Promise((resolve) => setTimeout(resolve, 750));
-    const result = inferPlaceFromText(text);
-    setExtractResult(result);
-    setVerification({ ...result, originalImage: uploadedImage, provider: 'local-text' });
-    setExtracting(false);
-  }
-
   async function pickScreenshot() {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -163,7 +150,7 @@ export default function App() {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       quality: 0.82,
       base64: true,
     });
@@ -208,22 +195,21 @@ export default function App() {
       ]);
 
       const payload = await response.json();
+
+      if (!response.ok) {
+        showToast(payload?.error || '장소 분석에 실패했어요. 다시 시도해주세요.');
+        setUploadedImage(null);
+        return;
+      }
+
       const result = normalizeExtractedPlace(payload, imagePayload);
       setExtractResult(result);
       setVerification(result);
-
-      if (result.provider === 'gemini') {
-        showToast('Gemini 이미지 분석 완료');
-      } else if (result.geminiError) {
-        showToast('Gemini 실패, fallback 결과 표시');
-      } else {
-        showToast('이미지 분석 결과 표시');
-      }
+      showToast('이미지 분석 완료');
     } catch (error) {
-      const fallback = inferPlaceFromImagePayload(promptHint || imagePayload);
-      setExtractResult(fallback);
-      setVerification({ ...fallback, originalImage: imagePayload, provider: 'local-fallback' });
-      showToast('서버 연결 실패, 앱 내부 추론으로 표시');
+      console.warn('Extract request failed', error);
+      showToast('서버에 연결할 수 없어요. PC 서버 실행과 Wi-Fi 연결을 확인해주세요.');
+      setUploadedImage(null);
     } finally {
       clearInterval(interval);
       setExtracting(false);
@@ -240,7 +226,7 @@ export default function App() {
       latitude: Number(source.latitude) || 37.5446,
       longitude: Number(source.longitude) || 127.0559,
       confidence: source.confidence || 0.9,
-      screenshotText: source.screenshotText || extractText,
+      screenshotText: source.screenshotText || '',
       originalImage: source.originalImage || uploadedImage,
     };
 
@@ -400,22 +386,6 @@ export default function App() {
               </View>
             ) : null}
 
-            <Text style={styles.settingDesc}>원클릭 데모 캡처로 즉시 테스트해보세요.</Text>
-            <View style={styles.demoRow}>
-              {demoScreenshots.map((demo, index) => (
-                <TouchableOpacity
-                  key={demo.name}
-                  style={styles.demoChip}
-                  onPress={() => {
-                    setUploadedImage(demo.imageUrl);
-                    triggerCaptureExtraction(demo.imageUrl, demo.promptHint);
-                  }}
-                >
-                  <Text style={styles.demoChipText}>데모 {index + 1}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
             {extracting ? (
               <View style={styles.extractingBox}>
                 <ActivityIndicator color="#3182F6" />
@@ -424,31 +394,11 @@ export default function App() {
             ) : null}
           </Glass>
 
-          <Glass style={styles.card}>
-            <View style={styles.badge}>
-              <Ionicons name="sparkles" size={15} color="#3182F6" />
-              <Text style={styles.badgeText}>캡션 텍스트 보조 분석</Text>
-            </View>
-            <TextInput
-              multiline
-              value={extractText}
-              onChangeText={setExtractText}
-              style={styles.textArea}
-              placeholder="공유 URL 또는 캡션 텍스트"
-              placeholderTextColor="#8B95A1"
-            />
-            <TouchableOpacity style={styles.primaryButton} onPress={() => runTextExtraction()}>
-              <Ionicons name="search" size={18} color="#FFFFFF" />
-              <Text style={styles.primaryButtonText}>텍스트로 분석하기</Text>
-            </TouchableOpacity>
-          </Glass>
-
           {verification && (
             <Glass style={styles.card}>
               <Text style={styles.resultConfidence}>
-                {verification.provider === 'gemini' ? 'Gemini 분석' : verification.geminiError ? 'Fallback 분석' : '자동 추론'} · {Math.round((verification.confidence || 0.9) * 100)}%
+                Gemini 분석 · {Math.round((verification.confidence || 0.9) * 100)}%
               </Text>
-              {verification.geminiError ? <Text style={styles.settingDesc}>Gemini 오류: {verification.geminiError}</Text> : null}
               <Text style={styles.resultTitle}>검증 후 저장</Text>
 
               <Text style={styles.fieldLabel}>장소명</Text>
@@ -552,7 +502,7 @@ export default function App() {
           <Text style={styles.pageTitle}>설정</Text>
           <Glass style={styles.card}>
             <Text style={styles.cardTitle}>PinSnap Archive</Text>
-            <Text style={styles.detailDesc}>캡처 이미지는 서버의 Gemini API로 분석하고, 실패하면 앱 내부 fallback을 표시합니다.</Text>
+            <Text style={styles.detailDesc}>캡처 이미지는 서버의 Gemini API로 분석하고, 저장한 장소는 Firestore에 동기화됩니다.</Text>
           </Glass>
         </ScrollView>
       )}
