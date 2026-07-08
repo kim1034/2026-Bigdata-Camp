@@ -6,6 +6,7 @@ import {
   PanResponder,
   SafeAreaView,
   ScrollView,
+  Share,
   StatusBar,
   Text,
   TextInput,
@@ -1637,8 +1638,8 @@ export default function App() {
               <Ionicons name="search-outline" size={18} color="#FFFFFF" />
             </View>
             <TouchableOpacity style={styles.flex} activeOpacity={0.82} onPress={() => setRouteSearchOpen(true)}>
-              <Text style={styles.routeGuideTitle}>?? ?? ??</Text>
-              <Text style={styles.routeGuideSub}>{routeBasePlace ? routeBasePlace.name : '??? ?? ??? ??? ???'}</Text>
+              <Text style={styles.routeGuideTitle}>기준 장소 검색</Text>
+              <Text style={styles.routeGuideSub}>{routeBasePlace ? routeBasePlace.name : '동선의 기준 장소를 검색해 주세요'}</Text>
             </TouchableOpacity>
             <TouchableOpacity activeOpacity={0.78} onPress={closeRouteSelectMode}>
               <Ionicons name="close" size={22} color="#111827" />
@@ -1652,7 +1653,7 @@ export default function App() {
                 <TextInput
                   value={routeBaseQuery}
                   onChangeText={setRouteBaseQuery}
-                  placeholder="?? ??, ???, ?? ??"
+                  placeholder="장소 이름, 숙소명, 주소로 검색"
                   placeholderTextColor="#8B95A1"
                   style={styles.routeSearchInput}
                   autoFocus
@@ -1671,7 +1672,7 @@ export default function App() {
                   </TouchableOpacity>
                 ))}
                 {routeSearchResults.length === 0 ? (
-                  <Text style={styles.routeEmptyText}>??? ???? ?? ??? ???. ?? ??? ???? ??? ??? ???.</Text>
+                  <Text style={styles.routeEmptyText}>검색 결과가 없어요. 다른 이름으로 다시 검색해 주세요.</Text>
                 ) : null}
               </ScrollView>
             </Glass>
@@ -1679,15 +1680,15 @@ export default function App() {
 
           <Glass style={styles.routeResultSheet}>
             <View style={styles.routeResultTop}>
-              <Text style={styles.routeResultTitle}>??? ??</Text>
+              <Text style={styles.routeResultTitle}>스마트 동선</Text>
               <TouchableOpacity style={styles.routeDoneButton} activeOpacity={0.82} onPress={completeSmartRoute}>
-                <Text style={styles.routeDoneText}>??</Text>
+                <Text style={styles.routeDoneText}>완료</Text>
               </TouchableOpacity>
             </View>
             {routePlaces.length > 0 ? (
               <TouchableOpacity style={styles.routeScheduleButton} activeOpacity={0.84} onPress={openSmartSchedulePage}>
                 <Ionicons name="calendar-outline" size={17} color="#FFFFFF" />
-                <Text style={styles.routeScheduleButtonText}>?? ??</Text>
+                <Text style={styles.routeScheduleButtonText}>일정 생성</Text>
               </TouchableOpacity>
             ) : null}
           </Glass>
