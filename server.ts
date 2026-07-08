@@ -1,295 +1,287 @@
-import express from "express";
-import path from "path";
-import dotenv from "dotenv";
-import { GoogleGenAI, Type } from "@google/genai";
-import { createServer as createViteServer } from "vite";
+import express from 'express';
+import path from 'path';
+import dotenv from 'dotenv';
+import { createServer as createHttpServer } from 'http';
+import { GoogleGenAI } from '@google/genai';
+import { createServer as createViteServer } from 'vite';
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const isProduction = process.env.NODE_ENV === 'production';
+const httpServer = createHttpServer(app);
 
-// Set body parser to handle large base64 screenshot images
-app.use(express.json({ limit: "20mb" }));
-app.use(express.urlencoded({ limit: "20mb", extended: true }));
+app.use(express.json({ limit: '30mb' }));
+app.use(express.urlencoded({ limit: '30mb', extended: true }));
 
-// Initialize Gemini API Client
-let ai: GoogleGenAI | null = null;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+type PlaceResult = {
+  name: string;
+  category: '카페' | '맛집' | '숙박' | '관광지';
+  address: string;
+  latitude: number;
+  longitude: number;
+  hours: string;
+  menu: Array<{ name: string; price: string }>;
+  reviewSummary: string;
+  screenshotText: string;
+  confidence: number;
+  provider?: string;
+};
 
-if (GEMINI_API_KEY && GEMINI_API_KEY !== "MY_GEMINI_API_KEY") {
-  try {
-    ai = new GoogleGenAI({
-      apiKey: GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
-    console.log("Gemini API Client initialized successfully.");
-  } catch (error) {
-    console.error("Failed to initialize Gemini API client:", error);
-  }
-} else {
-  console.log("GEMINI_API_KEY not set. Server will operate in Mock mode.");
+function normalizeCategory(value: unknown): PlaceResult['category'] {
+  const text = String(value || '');
+  if (text.includes('맛') || text.includes('식') || text.includes('레스토랑')) return '맛집';
+  if (text.includes('숙') || text.includes('호텔') || text.includes('펜션') || text.includes('스테이')) return '숙박';
+  if (text.includes('관광') || text.includes('공원') || text.includes('전시') || text.includes('체험')) return '관광지';
+  return '카페';
 }
 
-// Mock database / presets for trendy places in Seoul to serve as high-quality fallbacks
-const MOCK_PLACES_TEMPLATES = [
-  {
-    name: "어니언 성수 (onion)",
-    category: "카페" as const,
-    address: "서울특별시 성동구 아차산로9길 8",
-    latitude: 37.5446,
-    longitude: 127.0559,
-    hours: "매일 08:00 - 22:00 (라스트오더 21:30)",
-    menu: [
-      { name: "팡도르 (Pandoro)", price: "6,000원" },
-      { name: "아메리카노", price: "5,300원" },
-      { name: "앙버터", price: "5,500원" }
-    ],
-    reviewSummary: "폐공장을 개조한 성수동 대표 힙스터 감성 카페. 러프한 인테리어와 시그니처 빵인 슈가 파우더 가득한 팡도르가 매우 인기이며, 이국적이고 빈티지한 사진 맛집으로 유명합니다.",
-    screenshotText: "#성수동카페 #어니언 #onion 성수동 대표 핫플 드디어 방문! 팡도르 너무 달콤하고 맛있어요 분위기 미쳤음..."
-  },
-  {
-    name: "난포 성수",
-    category: "식당" as const,
-    address: "서울특별시 성동구 서울숲4길 18.000",
-    latitude: 37.5471,
-    longitude: 127.0425,
-    hours: "매일 11:00 - 21:30 (브레이크타임 15:50 - 17:00)",
-    menu: [
-      { name: "강된장쌈밥", price: "12,000원" },
-      { name: "돌문어국수", price: "14,000원" },
-      { name: "제철회묵은지말이", price: "13,000원" }
-    ],
-    reviewSummary: "퓨전 한식 맛집으로 곰취 강된장쌈밥과 제철회묵은지말이가 대표 메뉴입니다. 정갈한 분위기에서 자극적이지 않고 건강한 맛을 선사해 웨이팅이 항상 많은 서울숲 대표 식당입니다.",
-    screenshotText: "서울숲 퓨전 한식 '난포' 정갈하고 너무 맛있음 ㅠㅠ 강된장쌈밥 동글동글 짱귀여움..."
-  },
-  {
-    name: "스테이폴리오 한옥숙소 (서촌 율한)",
-    category: "펜션/숙소" as const,
-    address: "서울특별시 종로구 필운대로5가길 12",
-    latitude: 37.5802,
-    longitude: 126.9691,
-    hours: "체크인 15:00 / 체크아웃 11:00",
-    menu: [
-      { name: "평일 1박 (독채)", price: "320,000원" },
-      { name: "주말 1박 (독채)", price: "420,000원" }
-    ],
-    reviewSummary: "서촌의 고즈넉한 골목에 위치한 프라이빗 한옥 독채 숙소. 현대적인 편리함과 전통 한옥의 서까래 감성이 잘 어우러져 지친 일상 속에서 오롯이 쉼을 누릴 수 있는 자쿠지 보유 힐링 공간입니다.",
-    screenshotText: "서촌 골목 한가운데 숨겨진 힐링 독채한옥 자쿠지까지 완벽해서 힐링 제대로 하고 옴..."
-  },
-  {
-    name: "광화문 광장 & 경복궁",
-    category: "관광지/기타" as const,
-    address: "서울특별시 종로구 사직로 161",
-    latitude: 37.5759,
-    longitude: 126.9768,
-    hours: "매일 09:00 - 18:00 (화요일 휴무)",
-    menu: [
-      { name: "성인 입장료 (경복궁)", price: "3,000원" },
-      { name: "한복 착용자", price: "무료" }
-    ],
-    reviewSummary: "서울의 심장이자 역사가 살아 숨 쉬는 대표 명소. 광화문 광장 분수대부터 경복궁 근정전과 경회루까지 이어지는 코스는 한국의 전통 미를 가득 품어 산책과 사진 촬영에 최적화된 필수 코스입니다.",
-    screenshotText: "주말 서울 나들이 코스! 경복궁 야간개장 한복 입고 가면 무료 입장 꿀팁 공유..."
-  }
-];
-
-// API Route for screenshot analysis
-app.post("/api/extract", async (req, res) => {
-  try {
-    const { image } = req.body; // base64 string
-
-    if (!image) {
-      return res.status(400).json({ error: "이미지 데이터가 누락되었습니다." });
-    }
-
-    let base64Data = "";
-    let mimeType = "image/png";
-
-    if (typeof image === "string" && (image.startsWith("http://") || image.startsWith("https://"))) {
-      try {
-        console.log("Fetching image from URL for Gemini processing:", image);
-        const imageResponse = await fetch(image);
-        if (!imageResponse.ok) {
-          throw new Error(`Failed to fetch image: ${imageResponse.statusText}`);
-        }
-        const arrayBuffer = await imageResponse.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        base64Data = buffer.toString("base64");
-        mimeType = imageResponse.headers.get("content-type") || "image/png";
-      } catch (fetchError) {
-        console.error("Error fetching image URL:", fetchError);
-        // On fetch failure, fallback to returning a mock template directly to avoid Gemini API calling with empty data
-        const template = MOCK_PLACES_TEMPLATES[Math.floor(Math.random() * MOCK_PLACES_TEMPLATES.length)];
-        console.log("Fallback template returned due to image fetch failure:", template.name);
-        return res.json(template);
-      }
-    } else {
-      base64Data = image.replace(/^data:image\/\w+;base64,/, "");
-      mimeType = image.match(/^data:(image\/\w+);base64,/)?.[1] || "image/png";
-    }
-
-    // If Gemini Client is NOT initialized, fallback to mock data
-    if (!ai) {
-      console.log("No Gemini API client initialized. Returning mock data.");
-      // Return a random mock template, but styled slightly differently to feel organic
-      const template = MOCK_PLACES_TEMPLATES[Math.floor(Math.random() * MOCK_PLACES_TEMPLATES.length)];
-      return res.json(template);
-    }
-
-    console.log("Calling Gemini 3.5 Flash for screenshot OCR & place extraction...");
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: [
-        {
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Data,
-          },
-        },
-        {
-          text: `You are an advanced South Korean Place Extractor and OCR engine.
-Analyze this screenshot (from Instagram, Blog, Map, or Chat) and do the following:
-1. Extract all text via OCR.
-2. Search and infer the business/place name (가게명/장소명) and the specific region/neighborhood in South Korea (e.g. 성수동, 한남동, 홍대, 강릉, 제주 등).
-3. Determine its category exactly as one of the following: "카페", "식당", "펜션/숙소", "관광지/기타".
-4. Gather or simulate realistic high-quality Google Places data for this place:
-   - Full exact Korean address (도로명 주소).
-   - Accurate South Korea Latitude and Longitude (near Seoul or its identified region) so it can be correctly plotted on our Leaflet map. (Crucial: MUST be in South Korea, Latitude around 35.0-38.5, Longitude around 126.0-129.5).
-   - Standard Operating Hours in Korean (영업시간).
-   - Representative menu items (대표 메뉴) up to 3 items, showing name and price (e.g., "15,000원").
-   - A detailed Korean review summary (리뷰 요약) reflecting the overall public feedback (around 2-3 sentences).
-   - A short snippet of the extracted text or hashtag that led to this detection.
-
-You MUST respond strictly in JSON format matching the schema provided.`,
-        },
-      ],
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            name: {
-              type: Type.STRING,
-              description: "The name of the place (e.g., 어니언 성수, 난포 성수).",
-            },
-            category: {
-              type: Type.STRING,
-              description: "Must be exactly one of: '카페', '식당', '펜션/숙소', '관광지/기타'",
-            },
-            address: {
-              type: Type.STRING,
-              description: "The complete South Korean road address (도로명 주소).",
-            },
-            latitude: {
-              type: Type.NUMBER,
-              description: "The latitude coordinate (e.g., 37.5446). Must be in South Korea.",
-            },
-            longitude: {
-              type: Type.NUMBER,
-              description: "The longitude coordinate (e.g., 127.0559). Must be in South Korea.",
-            },
-            hours: {
-              type: Type.STRING,
-              description: "Operating hours (e.g., 매일 11:00 - 22:00).",
-            },
-            menu: {
-              type: Type.ARRAY,
-              description: "List of 2-3 popular menu items.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  name: { type: Type.STRING, description: "Menu name." },
-                  price: { type: Type.STRING, description: "Menu price (e.g., 12,000원)." },
-                },
-                required: ["name", "price"],
-              },
-            },
-            reviewSummary: {
-              type: Type.STRING,
-              description: "A summary of user reviews in Korean (2-3 sentences, engaging and helpful).",
-            },
-            screenshotText: {
-              type: Type.STRING,
-              description: "Brief extracted OCR text or hashtags from the image.",
-            },
-          },
-          required: [
-            "name",
-            "category",
-            "address",
-            "latitude",
-            "longitude",
-            "hours",
-            "menu",
-            "reviewSummary",
-            "screenshotText",
-          ],
-        },
-      },
+function normalizeMenu(value: unknown): Array<{ name: string; price: string }> {
+  if (Array.isArray(value)) {
+    return value.slice(0, 4).map((item) => {
+      if (typeof item === 'string') return { name: item, price: '정보 없음' };
+      return {
+        name: String(item?.name || '대표 메뉴'),
+        price: String(item?.price || '정보 없음'),
+      };
     });
-
-    const jsonText = response.text?.trim();
-    if (!jsonText) {
-      throw new Error("Gemini returned an empty response.");
-    }
-
-    const data = JSON.parse(jsonText);
-
-    // Strict validation and conversion of latitude and longitude coordinates
-    if (data.latitude !== undefined && data.latitude !== null) {
-      data.latitude = Number(data.latitude);
-      if (isNaN(data.latitude)) data.latitude = 37.5446;
-    } else {
-      data.latitude = 37.5446;
-    }
-
-    if (data.longitude !== undefined && data.longitude !== null) {
-      data.longitude = Number(data.longitude);
-      if (isNaN(data.longitude)) data.longitude = 127.0559;
-    } else {
-      data.longitude = 127.0559;
-    }
-
-    console.log("Extracted Place Data successfully:", data.name, `Coords: ${data.latitude}, ${data.longitude}`);
-    return res.json(data);
-  } catch (error) {
-    console.error("Error in /api/extract:", error);
-    // On error, fallback gracefully to a mock template to maintain smooth UI flow
-    const fallbackTemplate = MOCK_PLACES_TEMPLATES[Math.floor(Math.random() * MOCK_PLACES_TEMPLATES.length)];
-    console.log("Error fallback triggered. Returning template:", fallbackTemplate.name);
-    return res.json(fallbackTemplate);
   }
+
+  const text = String(value || '').trim();
+  return text ? [{ name: text, price: '정보 없음' }] : [{ name: '대표 메뉴', price: '정보 없음' }];
+}
+
+function normalizePlaceResult(raw: any, fallbackText: string, provider: string): PlaceResult {
+  return {
+    name: String(raw?.name || '분석된 장소'),
+    category: normalizeCategory(raw?.category),
+    address: String(raw?.address || '주소 확인 필요'),
+    latitude: Number(raw?.latitude) || 37.5446,
+    longitude: Number(raw?.longitude) || 127.0559,
+    hours: String(raw?.hours || '영업시간 확인 필요'),
+    menu: normalizeMenu(raw?.menu),
+    reviewSummary: String(raw?.reviewSummary || raw?.review_summary || '이미지 분석 결과를 바탕으로 저장된 장소입니다.'),
+    screenshotText: String(raw?.screenshotText || raw?.screenshot_text || fallbackText || '캡처 이미지 분석 결과'),
+    confidence: Math.max(0, Math.min(1, Number(raw?.confidence) || 0.82)),
+    provider,
+  };
+}
+
+function inferMockPlace(text: string): PlaceResult {
+  const value = text.toLowerCase();
+
+  if (text.includes('숙소') || text.includes('스테이') || text.includes('한옥') || text.includes('펜션')) {
+    return {
+      name: value.includes('제주') ? '제주 감성 독채 펜션' : '스테이 한옥',
+      category: '숙박',
+      address: value.includes('제주') ? '제주 제주시 애월읍' : '서울 종로구 자하문로',
+      latitude: value.includes('제주') ? 33.4631 : 37.5802,
+      longitude: value.includes('제주') ? 126.3104 : 126.9691,
+      hours: '체크인 15:00 / 체크아웃 11:00',
+      menu: [{ name: '감성 숙소 1박', price: '320,000원' }],
+      reviewSummary: '캡처 이미지에서 숙소 키워드를 감지해 조용한 숙박 코스로 분류했습니다.',
+      screenshotText: text,
+      confidence: 0.86,
+      provider: 'mock',
+    };
+  }
+
+  if (text.includes('맛집') || text.includes('식당') || text.includes('국수') || text.includes('덮밥') || text.includes('파스타')) {
+    return {
+      name: value.includes('한남') ? '한남동 퓨전 파스타' : '쵸리상경 성수',
+      category: '맛집',
+      address: value.includes('한남') ? '서울 용산구 한남동' : '서울 성동구 서울숲길 18',
+      latitude: value.includes('한남') ? 37.5344 : 37.5471,
+      longitude: value.includes('한남') ? 127.0008 : 127.0425,
+      hours: '매일 11:00 - 21:30',
+      menu: [
+        { name: value.includes('파스타') ? '시그니처 파스타' : '갈릭 덮밥', price: '12,000원' },
+        { name: value.includes('파스타') ? '글라스 와인' : '고기 국수', price: '14,000원' },
+      ],
+      reviewSummary: '식사 관련 키워드와 지역 맥락을 함께 보고 맛집으로 저장합니다.',
+      screenshotText: text,
+      confidence: 0.88,
+      provider: 'mock',
+    };
+  }
+
+  return {
+    name: value.includes('onion') || text.includes('어니언') ? '어니언 성수' : '무브모브 성수',
+    category: '카페',
+    address: '서울 성동구 성수이로',
+    latitude: 37.5438,
+    longitude: 127.0569,
+    hours: '매일 10:30 - 22:00',
+    menu: [
+      { name: '크림 라떼', price: '6,500원' },
+      { name: '수제 케이크', price: '8,000원' },
+    ],
+    reviewSummary: '릴스 저장 반응이 높은 성수 디저트 카페로 자동 분류했습니다.',
+    screenshotText: text,
+    confidence: 0.93,
+    provider: 'mock',
+  };
+}
+
+function inferImagePrompt(image: string, promptHint = '') {
+  const value = `${image} ${promptHint}`.toLowerCase();
+  if (value.includes('607377') || value.includes('hotel') || value.includes('pension') || value.includes('제주')) {
+    return '제주 감성 독채 펜션 숙소 캡처 OCR 결과';
+  }
+  if (value.includes('151724') || value.includes('restaurant') || value.includes('pasta') || value.includes('한남')) {
+    return '한남동 퓨전 파스타 맛집 캡처 OCR 결과';
+  }
+  return '성수 대형 에스프레소 바 카페 캡처 OCR 결과';
+}
+
+function parseDataUriImage(image: string) {
+  const match = image.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return {
+    mimeType: match[1] || 'image/jpeg',
+    data: match[2],
+  };
+}
+
+async function imageToInlineData(image: string) {
+  const dataUri = parseDataUriImage(image);
+  if (dataUri) return dataUri;
+
+  if (/^https?:\/\//i.test(image)) {
+    const response = await fetch(image);
+    if (!response.ok) {
+      throw new Error(`이미지를 불러오지 못했습니다. (${response.status})`);
+    }
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return {
+      mimeType: contentType.split(';')[0],
+      data: buffer.toString('base64'),
+    };
+  }
+
+  return {
+    mimeType: 'image/jpeg',
+    data: image,
+  };
+}
+
+async function analyzeImageWithGemini(image: string, promptHint = '') {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY가 설정되어 있지 않습니다.');
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+  const inlineData = await imageToInlineData(image);
+  const model = process.env.GEMINI_MODEL || process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash';
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        inlineData,
+      },
+      {
+        text: [
+          '이 이미지는 인스타그램, 지도, 블로그, 장소 리뷰 캡처일 수 있습니다.',
+          '이미지 안의 텍스트와 시각 정보를 분석해서 실제 방문 장소 후보를 추출하세요.',
+          '한국어 JSON만 반환하세요. 마크다운 코드블록은 쓰지 마세요.',
+          'JSON 필드: name, category, address, latitude, longitude, hours, menu, reviewSummary, screenshotText, confidence',
+          'category는 반드시 카페, 맛집, 숙박, 관광지 중 하나로 쓰세요.',
+          'menu는 [{ "name": "...", "price": "..." }] 배열로 쓰세요.',
+          '좌표를 확실히 모르면 서울/한국 내 합리적인 추정 좌표를 넣고 confidence를 낮추세요.',
+          promptHint ? `추가 힌트: ${promptHint}` : '',
+        ].filter(Boolean).join('\n'),
+      },
+    ],
+    config: {
+      responseMimeType: 'application/json',
+    },
+  });
+
+  const text = response.text || '';
+  const parsed = JSON.parse(text);
+  return normalizePlaceResult(parsed, parsed?.screenshotText || promptHint, 'gemini');
+}
+
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    app: 'PinSnap Archive',
+    gemini: Boolean(process.env.GEMINI_API_KEY),
+  });
 });
 
-// Start Express server and integrate Vite middleware
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    // Development Mode
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-    console.log("Vite development middleware attached.");
-  } else {
-    // Production Mode
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-    console.log("Serving static files from dist/ folder.");
+app.post('/api/extract', async (req, res) => {
+  const image = String(req.body?.image || '').trim();
+  const text = String(req.body?.text || req.body?.prompt || '').trim();
+  const promptHint = String(req.body?.promptHint || '').trim();
+
+  if (image) {
+    try {
+      const place = await analyzeImageWithGemini(image, promptHint);
+      res.json(place);
+      return;
+    } catch (error) {
+      console.error('[Gemini image analysis failed]', error);
+      const fallback = inferMockPlace(inferImagePrompt(image, promptHint));
+      res.json({
+        ...fallback,
+        provider: 'mock-fallback',
+        geminiError: error instanceof Error ? error.message : 'Gemini 분석 실패',
+      });
+      return;
+    }
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Pinsnap Server] Running on http://localhost:${PORT}`);
+  if (!text) {
+    res.status(400).json({ error: '분석할 텍스트나 이미지가 필요합니다.' });
+    return;
+  }
+
+  res.json({
+    place: inferMockPlace(text),
+    provider: process.env.GEMINI_API_KEY ? 'mock-ready-for-gemini' : 'mock',
+  });
+});
+
+async function start() {
+  if (isProduction) {
+    const distPath = path.resolve(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  } else {
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: { server: httpServer },
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  }
+
+  httpServer.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`[PinSnap Server] ${PORT} 포트가 이미 사용 중입니다.`);
+      console.error('이미 켜진 dev 서버를 닫거나 .env에서 PORT=3001처럼 다른 포트를 지정해 주세요.');
+      process.exit(1);
+    }
+
+    console.error(error);
+    process.exit(1);
+  });
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`[PinSnap Server] http://localhost:${PORT}`);
   });
 }
 
-startServer();
+start().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
