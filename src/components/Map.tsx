@@ -20,14 +20,14 @@ const getCategoryStyles = (category: CategoryType) => {
   switch (category) {
     case "카페":
       return {
-        bgClass: "bg-amber-500",
-        borderClass: "border-amber-600",
+        bgClass: "bg-sky-500",
+        borderClass: "border-sky-600",
         iconSvg: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 8h1a4 4 0 1 1 0 8h-1"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z"/><line x1="6" x2="6" y1="2" y2="4"/><line x1="10" x2="10" y1="2" y2="4"/><line x1="14" x2="14" y1="2" y2="4"/></svg>`
       };
     case "식당":
       return {
-        bgClass: "bg-rose-500",
-        borderClass: "border-rose-600",
+        bgClass: "bg-blue-500",
+        borderClass: "border-blue-600",
         iconSvg: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2v0a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/></svg>`
       };
     case "펜션/숙소":
@@ -39,8 +39,8 @@ const getCategoryStyles = (category: CategoryType) => {
     case "관광지/기타":
     default:
       return {
-        bgClass: "bg-emerald-500",
-        borderClass: "border-emerald-600",
+        bgClass: "bg-slate-700",
+        borderClass: "border-slate-800",
         iconSvg: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.886H3.82l5.117 3.718L7 18.5 12 14.75l5 3.75-1.938-5.896 5.117-3.718h-6.268Z"/></svg>`
       };
   }
@@ -181,7 +181,7 @@ export default function Map({
         <div class="relative group">
           <!-- Active pulse effect if selected -->
           ${isSelected ? `<span class="animate-ping absolute inline-flex h-10 w-10 rounded-full ${styles.bgClass} opacity-40"></span>` : ''}
-          <div class="flex items-center justify-center w-10 h-10 rounded-full border-2 border-white shadow-lg ${styles.bgClass} text-white transform hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer ${isSelected ? 'scale-115 ring-4 ring-offset-2 ring-[#FF5A5F] shadow-xl' : 'scale-100'}">
+          <div class="flex items-center justify-center w-10 h-10 rounded-full border-2 border-white shadow-lg ${styles.bgClass} text-white transform hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer ${isSelected ? 'scale-115 ring-4 ring-offset-2 ring-[#0064FF] shadow-xl' : 'scale-100'}">
             ${styles.iconSvg}
             
             <!-- Visitation route order bubble if routing active -->
@@ -242,8 +242,8 @@ export default function Map({
 
     if (circleCenter) {
       circleLayerRef.current = L_Library.circle(circleCenter, {
-        color: "#FF5A5F",
-        fillColor: "#FF5A5F",
+        color: "#0064FF",
+        fillColor: "#0064FF",
         fillOpacity: 0.12,
         radius: circleRadius,
         weight: 1.5,
@@ -263,7 +263,7 @@ export default function Map({
     if (routePlaces && routePlaces.length >= 2) {
       const latlngs = routePlaces.map((p) => [p.latitude, p.longitude]);
       polylineLayerRef.current = L_Library.polyline(latlngs, {
-        color: "#FF5A5F",
+        color: "#0064FF",
         weight: 3.5,
         opacity: 0.85,
         dashArray: "6, 6",
