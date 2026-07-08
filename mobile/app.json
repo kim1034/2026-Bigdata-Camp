@@ -2,6 +2,7 @@
   "expo": {
     "name": "PinSnap Archive",
     "slug": "pinsnap-archive",
+    "scheme": "pinsnaparchive",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
@@ -12,9 +13,11 @@
       "**/*"
     ],
     "ios": {
+      "bundleIdentifier": "com.pinsnap.archive",
       "supportsTablet": true
     },
     "android": {
+      "package": "com.pinsnap.archive",
       "edgeToEdgeEnabled": true,
       "adaptiveIcon": {
         "backgroundColor": "#F7F8FA"

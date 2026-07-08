@@ -1,17 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   Alert,
   Image,
   PanResponder,
-  SafeAreaView,
   ScrollView,
+  Share,
   StatusBar,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
@@ -22,10 +24,15 @@ import {
   deleteCollectionFromFirestore,
   isFirebaseDbConfigured,
   loadCollectionsFromFirestore,
+  loadPlaceReviewsFromFirestore,
   loadPlacesFromFirestore,
   saveCollectionToFirestore,
+  saveItineraryToFirestore,
+  savePlaceReviewToFirestore,
   savePlaceToFirestore,
-} from './src/services/firebaseDb';
+  saveRouteToFirestore,
+  setActiveWorkspaceId,
+} from './src/db/firebaseDb';
 import { buildRoute } from './src/utils/inference';
 import { styles } from './src/styles';
 
@@ -35,6 +42,11 @@ const ROUTE_PAN_SENSITIVITY = 1.65;
 const ROUTE_PAN_MIN_DELTA = 0.8;
 const ROUTE_PINCH_ZOOM_SENSITIVITY = 1.25;
 const ROUTE_ZOOM_MIN_DELTA = 0.012;
+const DETAIL_MINI_HEIGHT = 106;
+const DETAIL_EXPAND_THRESHOLD = -360;
+const DETAIL_DRAG_LIMIT = -430;
+const DETAIL_FAST_FLICK_MIN_DRAG = -90;
+const DETAIL_FAST_FLICK_VELOCITY = -2.4;
 
 const collectionIconOptions = [
   'albums-outline',
@@ -62,6 +74,7 @@ const starterCollections = [
     color: '#3182F6',
     icon: 'albums-outline',
     placeIds: [],
+    routes: [],
     createdAt: Date.now(),
   },
 ];
@@ -103,6 +116,82 @@ function normalizeExtractedPlace(payload, fallbackImage) {
     ...source,
     menu: normalizeMenu(source.menu),
     originalImage: fallbackImage,
+  };
+}
+
+function compactRoutePlace(place) {
+  const latitude = Number(place.latitude ?? place.lat);
+  const longitude = Number(place.longitude ?? place.lng);
+  return {
+    id: place.id,
+    name: place.name,
+    category: place.category,
+    address: place.address,
+    latitude: Number.isFinite(latitude) ? latitude : 0,
+    longitude: Number.isFinite(longitude) ? longitude : 0,
+  };
+}
+
+function compactCollectionPlace(place) {
+  return {
+    ...compactRoutePlace(place),
+    hours: place.hours || '',
+    menu: normalizeMenu(place.menu),
+    reviewSummary: place.reviewSummary || '',
+    confidence: Number(place.confidence || 0.85),
+    googlePlaceId: place.googlePlaceId,
+    provider: place.provider,
+    photoUrl: place.photoUrl,
+    rating: place.rating ?? null,
+    userRatingsTotal: place.userRatingsTotal ?? null,
+    pinColor: place.pinColor,
+    collectionIds: Array.isArray(place.collectionIds) ? place.collectionIds : [],
+  };
+}
+
+function compactItineraryItem(item) {
+  return {
+    time: item.time,
+    activity: item.activity,
+    duration: item.duration,
+    hoursCheck: item.hoursCheck,
+    tip: item.tip,
+    transitToNext: item.transitToNext || null,
+    place: item.place ? compactRoutePlace(item.place) : null,
+  };
+}
+
+function buildCollectionRouteSnapshot({ basePlace, routePlaces, visitDate, itinerary, provider }) {
+  const orderedPlaces = routePlaces.filter(Boolean);
+  const baseName = basePlace?.name || '기준점';
+  return {
+    id: `route-${Date.now()}`,
+    title: `${baseName} 기준 스마트 동선`,
+    basePlace: basePlace ? compactRoutePlace(basePlace) : null,
+    placeIds: orderedPlaces.map((place) => place.id),
+    places: orderedPlaces.map(compactRoutePlace),
+    visitDate: visitDate || '',
+    itinerary: Array.isArray(itinerary) ? itinerary.map(compactItineraryItem) : [],
+    provider: provider || '',
+    createdAt: Date.now(),
+  };
+}
+
+function buildItinerarySnapshot({ routeSnapshot, basePlace, routePlaces, visitDate, itinerary, provider, region }) {
+  const orderedPlaces = routePlaces.filter(Boolean);
+  const baseName = basePlace?.name || routeSnapshot?.basePlace?.name || '기준점';
+  return {
+    id: `itinerary-${Date.now()}`,
+    routeId: routeSnapshot?.id || '',
+    title: `${baseName} 기준 AI 추천 일정표`,
+    basePlace: basePlace ? compactRoutePlace(basePlace) : routeSnapshot?.basePlace || null,
+    visitDate: visitDate || '',
+    region: region || '',
+    provider: provider || '',
+    items: Array.isArray(itinerary) ? itinerary.map(compactItineraryItem) : [],
+    placeIds: orderedPlaces.map((place) => place.id),
+    places: orderedPlaces.map(compactRoutePlace),
+    createdAt: Date.now(),
   };
 }
 
@@ -198,9 +287,9 @@ function getRegionOfAddress(address) {
 function categoryKind(category) {
   const text = String(category || '');
   if (text.includes('카페')) return 'cafe';
-  if (text.includes('맛') || text.includes('식당') || text.includes('앸')) return 'food';
-  if (text.includes('숙') || text.includes('펜션') || text.includes('숈')) return 'stay';
-  if (text.includes('관광') || text.includes('공원')) return 'attraction';
+  if (text.includes('맛집') || text.includes('식당') || text.includes('음식')) return 'food';
+  if (text.includes('숙박') || text.includes('숙소') || text.includes('펜션') || text.includes('호텔')) return 'stay';
+  if (text.includes('관광') || text.includes('공원') || text.includes('명소')) return 'attraction';
   return 'place';
 }
 
@@ -237,7 +326,6 @@ function itineraryActivityForPlace(place) {
     tip: '동선 중간에 배치하면 이동 피로를 줄이고 주변까지 자연스럽게 둘러볼 수 있어요.',
   };
 }
-
 function buildNearestRoute(basePlace, sourcePlaces, limit = 6) {
   if (!placeCoordinate(basePlace)) return [];
   const remaining = sourcePlaces
@@ -348,8 +436,41 @@ function categoryFromGoogleTypes(types = []) {
   return categories[4]?.label || categories[1]?.label || 'Place';
 }
 
+function detailPlaceKey(place) {
+  return String(place?.googlePlaceId || place?.id || 'unknown');
+}
+
+function googlePhotoUrl(photo) {
+  if (photo?.url) return photo.url;
+  const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL;
+  if (!apiBase || !photo?.reference) return '';
+  const baseUrl = apiBase.replace(/\/$/, '');
+  return `${baseUrl}/api/places/google-photo?reference=${encodeURIComponent(photo.reference)}&maxWidth=900`;
+}
+
+function ratingStars(rating) {
+  const nextRating = Math.max(0, Math.min(5, Math.round(Number(rating) || 0)));
+  return Array.from({ length: 5 }, (_, index) => (index < nextRating ? 'star' : 'star-outline'));
+}
+
+function defaultWorkspaceId() {
+  return process.env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
+}
+
+function genderLabel(value) {
+  const labels = {
+    female: '여성',
+    male: '남성',
+    other: '기타',
+    none: '선택 안 함',
+  };
+  return labels[value] || labels.none;
+}
+
 export default function App() {
   const mapRef = useRef(null);
+  const detailDragY = useRef(new Animated.Value(0)).current;
+  const detailDragExpandedRef = useRef(false);
   const routeGestureModeRef = useRef('idle');
   const singleTouchRef = useRef(null);
   const twoFingerAnchorRef = useRef(null);
@@ -359,9 +480,31 @@ export default function App() {
   const routeZoomFrameRef = useRef(false);
   const routeZoomDeltaRef = useRef(0);
   const [tab, setTab] = useState('map');
+  const [authUser, setAuthUser] = useState(null);
+  const [authStatus, setAuthStatus] = useState('idle');
+  const [authMessage, setAuthMessage] = useState('');
+  const [authMode, setAuthMode] = useState('login');
+  const [authDraft, setAuthDraft] = useState({
+    userId: '',
+    password: '',
+    nickname: '',
+    age: '',
+    gender: 'none',
+  });
   const [places, setPlaces] = useState([]);
   const [selectedPlace, setSelectedPlace] = useState(null);
   const [detailSheetVisible, setDetailSheetVisible] = useState(false);
+  const [detailExpanded, setDetailExpanded] = useState(false);
+  const [detailTab, setDetailTab] = useState('photos');
+  const [googlePlaceDetails, setGooglePlaceDetails] = useState({
+    status: 'idle',
+    photos: [],
+    reviews: [],
+    message: '',
+  });
+  const [userReviews, setUserReviews] = useState([]);
+  const [reviewDraft, setReviewDraft] = useState({ rating: 5, comment: '' });
+  const [reviewSaving, setReviewSaving] = useState(false);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('전체');
   const [extracting, setExtracting] = useState(false);
@@ -400,12 +543,14 @@ export default function App() {
   const [collections, setCollections] = useState(starterCollections);
   const [selectedCollectionId, setSelectedCollectionId] = useState(starterCollections[0].id);
   const [collectionPickerPlace, setCollectionPickerPlace] = useState(null);
+  const [collectionPickerRoute, setCollectionPickerRoute] = useState(null);
   const [collectionCreatorOpen, setCollectionCreatorOpen] = useState(false);
   const [collectionDraft, setCollectionDraft] = useState({
     name: '',
     icon: collectionIconOptions[0],
     color: collectionColorOptions[0],
   });
+  const currentWorkspaceId = authUser?.workspaceId || defaultWorkspaceId();
 
   const visiblePlaces = useMemo(() => {
     return places.filter((place) => {
@@ -424,10 +569,28 @@ export default function App() {
   );
   const selectedCollectionPlaces = useMemo(() => {
     if (!selectedCollection) return [];
-    return selectedCollection.placeIds
-      .map((placeId) => places.find((place) => place.id === placeId))
-      .filter(Boolean);
+    const snapshots = Array.isArray(selectedCollection.places) ? selectedCollection.places : [];
+    const snapshotById = new Map(snapshots.filter((place) => place?.id).map((place) => [place.id, place]));
+    const livePlaceById = new Map(places.map((place) => [place.id, place]));
+    const placeIds = Array.isArray(selectedCollection.placeIds) ? selectedCollection.placeIds : [];
+    const ids = placeIds.length ? placeIds : snapshots.map((place) => place.id).filter(Boolean);
+
+    return Array.from(new Set(ids)).map(
+      (placeId) =>
+        livePlaceById.get(placeId) ||
+        snapshotById.get(placeId) || {
+          id: placeId,
+          name: '저장된 장소',
+          category: '동기화 필요',
+          address: '장소 원본 데이터를 불러오지 못했어요.',
+          missing: true,
+        }
+    );
   }, [places, selectedCollection]);
+  const selectedCollectionRoutes = useMemo(() => {
+    if (!selectedCollection) return [];
+    return Array.isArray(selectedCollection.routes) ? selectedCollection.routes : [];
+  }, [selectedCollection]);
   const routeSearchResults = useMemo(() => {
     const text = routeBaseQuery.trim().toLowerCase();
     const source = places.filter((place) => placeCoordinate(place));
@@ -554,18 +717,144 @@ export default function App() {
       }),
     [routeSelectMode]
   );
+  function resetDetailDragPosition() {
+    detailDragExpandedRef.current = false;
+    Animated.spring(detailDragY, {
+      toValue: 0,
+      useNativeDriver: false,
+      tension: 190,
+      friction: 18,
+    }).start();
+  }
+
+  function expandDetailFromDrag() {
+    detailDragExpandedRef.current = true;
+    detailDragY.stopAnimation();
+    setDetailExpanded(true);
+  }
+
+  function collapseDetailToMini() {
+    detailDragExpandedRef.current = false;
+    detailDragY.setValue(0);
+    setDetailExpanded(false);
+  }
+
+  function shouldExpandDetail(gestureState, dragY) {
+    const nextY = Math.max(DETAIL_DRAG_LIMIT, Math.min(0, Number(dragY) || 0));
+    const isPastThreshold = nextY <= DETAIL_EXPAND_THRESHOLD;
+    const isVeryFastFlick = nextY <= DETAIL_FAST_FLICK_MIN_DRAG && gestureState.vy <= DETAIL_FAST_FLICK_VELOCITY;
+    return isPastThreshold || isVeryFastFlick;
+  }
+
+  const detailSheetResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) =>
+          detailSheetVisible &&
+          !detailExpanded &&
+          Math.abs(gestureState.dy) > 6 &&
+          Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+        onPanResponderGrant: () => {
+          detailDragExpandedRef.current = false;
+          detailDragY.stopAnimation();
+        },
+        onPanResponderMove: (_event, gestureState) => {
+          if (detailExpanded || detailDragExpandedRef.current) return;
+          const nextY = Math.max(DETAIL_DRAG_LIMIT, Math.min(0, gestureState.dy));
+          detailDragY.setValue(nextY);
+          if (shouldExpandDetail(gestureState, nextY)) {
+            expandDetailFromDrag();
+          }
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          if (detailDragExpandedRef.current) return;
+          if (shouldExpandDetail(gestureState, gestureState.dy)) {
+            expandDetailFromDrag();
+            return;
+          }
+          resetDetailDragPosition();
+        },
+        onPanResponderTerminate: () => {
+          if (!detailDragExpandedRef.current) {
+            resetDetailDragPosition();
+          }
+        },
+      }),
+    [detailDragY, detailExpanded, detailSheetVisible]
+  );
+  const detailMiniHeight = detailDragY.interpolate({
+    inputRange: [DETAIL_DRAG_LIMIT, 0],
+    outputRange: [DETAIL_MINI_HEIGHT + Math.abs(DETAIL_DRAG_LIMIT), DETAIL_MINI_HEIGHT],
+    extrapolate: 'clamp',
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+    setActiveWorkspaceId(currentWorkspaceId);
+
+    async function hydrateWorkspace() {
+      if (!isFirebaseDbConfigured()) return;
+
+      try {
+        const [remotePlaces, remoteCollections] = await Promise.all([
+          loadPlacesFromFirestore(),
+          loadCollectionsFromFirestore(),
+        ]);
+
+        if (!isMounted) return;
+
+        setPlaces(remotePlaces);
+        if (remotePlaces.length > 0) {
+          setSelectedPlace(remotePlaces[0]);
+          setDetailSheetVisible(true);
+          setDetailExpanded(false);
+          setRoutePlaces(buildRoute(remotePlaces.slice(0, 4)));
+        } else {
+          setSelectedPlace(null);
+          setDetailSheetVisible(false);
+          setRoutePlaces([]);
+        }
+
+        if (remoteCollections.length > 0) {
+          setCollections(remoteCollections);
+          setSelectedCollectionId(remoteCollections[0].id);
+        } else {
+          setCollections(starterCollections);
+          setSelectedCollectionId(starterCollections[0].id);
+        }
+      } catch (error) {
+        console.warn('Failed to hydrate workspace', error);
+        if (isMounted) {
+          setMapStatus({
+            status: 'firebase-error',
+            message: error instanceof Error ? error.message : 'Firestore 데이터를 불러오지 못했습니다.',
+          });
+        }
+      }
+    }
+
+    hydrateWorkspace();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentWorkspaceId]);
 
   useEffect(() => {
     let isMounted = true;
 
     async function hydratePlaces() {
-      if (!isFirebaseDbConfigured()) return;
+      if (!isFirebaseDbConfigured()) {
+        if (isMounted) setMapStatus({ status: 'firebase-missing', message: 'Firebase 설정이 없어 DB 동기화를 건너뜁니다.' });
+        return;
+      }
       try {
         const remotePlaces = await loadPlacesFromFirestore();
         if (isMounted && remotePlaces.length > 0) {
           setPlaces(remotePlaces);
           setSelectedPlace(remotePlaces[0]);
           setDetailSheetVisible(true);
+          setDetailExpanded(false);
           setRoutePlaces(buildRoute(remotePlaces.slice(0, 4)));
         }
         const remoteCollections = await loadCollectionsFromFirestore();
@@ -575,6 +864,12 @@ export default function App() {
         }
       } catch (error) {
         console.warn('Failed to load Firestore places', error);
+        if (isMounted) {
+          setMapStatus({
+            status: 'firebase-error',
+            message: error instanceof Error ? error.message : 'Firestore 데이터를 불러오지 못했습니다.',
+          });
+        }
       }
     }
 
@@ -605,9 +900,262 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let isMounted = true;
+    const placeKey = detailPlaceKey(selectedPlace);
+
+    setDetailTab('photos');
+    setReviewDraft({ rating: 5, comment: '' });
+    setUserReviews([]);
+
+    async function loadGoogleDetails() {
+      if (!selectedPlace) {
+        setGooglePlaceDetails({ status: 'idle', photos: [], reviews: [], message: '' });
+        return;
+      }
+
+      const fallbackPhotos = selectedPlace.photoUrl ? [{ url: selectedPlace.photoUrl }] : [];
+      const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL;
+      if (!apiBase) {
+        setGooglePlaceDetails({
+          status: fallbackPhotos.length ? 'ready' : 'unavailable',
+          photos: fallbackPhotos,
+          reviews: [],
+          message: 'API 서버 주소가 필요합니다.',
+        });
+        return;
+      }
+
+      setGooglePlaceDetails({ status: 'loading', photos: fallbackPhotos, reviews: [], message: 'Google 사진과 리뷰를 불러오는 중...' });
+      try {
+        const detailParams = new URLSearchParams();
+        if (selectedPlace.googlePlaceId) {
+          detailParams.set('placeId', selectedPlace.googlePlaceId);
+        } else {
+          detailParams.set('name', selectedPlace.name || '');
+          detailParams.set('address', selectedPlace.address || '');
+          const coordinate = placeCoordinate(selectedPlace);
+          if (coordinate) {
+            detailParams.set('lat', String(coordinate.lat));
+            detailParams.set('lng', String(coordinate.lng));
+          }
+        }
+
+        const response = await fetch(`${apiBase.replace(/\/$/, '')}/api/places/google-details?${detailParams.toString()}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload?.message || 'Google 장소 상세 정보를 불러오지 못했습니다.');
+        }
+
+        if (!isMounted || placeKey !== detailPlaceKey(selectedPlace)) return;
+        setGooglePlaceDetails({
+          status: 'ready',
+          photos: Array.isArray(payload.photos) && payload.photos.length ? payload.photos : fallbackPhotos,
+          reviews: Array.isArray(payload.reviews) ? payload.reviews : [],
+          rating: payload.rating,
+          userRatingsTotal: payload.userRatingsTotal,
+          url: payload.url,
+          message: '',
+        });
+
+        if (payload.googlePlaceId && !selectedPlace.googlePlaceId) {
+          const enrichedPlace = {
+            ...selectedPlace,
+            googlePlaceId: payload.googlePlaceId,
+            rating: payload.rating ?? selectedPlace.rating,
+            userRatingsTotal: payload.userRatingsTotal ?? selectedPlace.userRatingsTotal,
+          };
+          setSelectedPlace((current) =>
+            current?.id === selectedPlace.id ? { ...current, ...enrichedPlace } : current
+          );
+          setPlaces((current) =>
+            current.map((place) => (place.id === selectedPlace.id ? { ...place, ...enrichedPlace } : place))
+          );
+          savePlaceToFirestore(enrichedPlace).catch((error) => {
+            console.warn('Failed to persist resolved googlePlaceId', error);
+          });
+        }
+      } catch (error) {
+        if (!isMounted) return;
+        setGooglePlaceDetails({
+          status: fallbackPhotos.length ? 'ready' : 'error',
+          photos: fallbackPhotos,
+          reviews: [],
+          message: error instanceof Error ? error.message : 'Google 장소 상세 정보를 불러오지 못했습니다.',
+        });
+      }
+    }
+
+    async function loadUserReviews() {
+      if (!selectedPlace || !isFirebaseDbConfigured()) return;
+      try {
+        const reviews = await loadPlaceReviewsFromFirestore(placeKey);
+        if (isMounted && placeKey === detailPlaceKey(selectedPlace)) {
+          setUserReviews(reviews);
+        }
+      } catch (error) {
+        console.warn('Failed to load place reviews', error);
+      }
+    }
+
+    loadGoogleDetails();
+    loadUserReviews();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedPlace?.id, selectedPlace?.googlePlaceId, selectedPlace?.photoUrl]);
+
   function showToast(message) {
     setToast(message);
     setTimeout(() => setToast(''), 1700);
+  }
+
+  async function readApiJson(response, fallbackMessage) {
+    const text = await response.text();
+    if (!text) {
+      throw new Error(`${fallbackMessage} 서버 응답이 비어 있습니다. (${response.status})`);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      const preview = text.replace(/\s+/g, ' ').slice(0, 120);
+      throw new Error(`${fallbackMessage} JSON 응답이 아닙니다. (${response.status}) ${preview}`);
+    }
+  }
+
+  function updateAuthDraft(key, value) {
+    setAuthDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function applyAuthSuccess(payload, message) {
+    setAuthUser(payload.user);
+    setActiveWorkspaceId(payload.workspaceId || payload.user?.workspaceId || defaultWorkspaceId());
+    setAuthStatus('ready');
+    setAuthMessage(message);
+    showToast(message);
+  }
+
+  async function submitPasswordAuth() {
+    const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL;
+    if (!apiBase) {
+      setAuthStatus('error');
+      setAuthMessage('EXPO_PUBLIC_API_BASE_URL이 필요합니다.');
+      showToast('API 서버 주소를 설정해 주세요');
+      return;
+    }
+
+    const userId = authDraft.userId.trim().toLowerCase();
+    const password = authDraft.password;
+    const nickname = authDraft.nickname.trim();
+    const age = Number(authDraft.age);
+
+    if (!userId || !password) {
+      setAuthStatus('error');
+      setAuthMessage('아이디와 비밀번호를 입력해 주세요.');
+      return;
+    }
+
+    if (authMode === 'register' && (!nickname || !authDraft.age)) {
+      setAuthStatus('error');
+      setAuthMessage('닉네임과 나이를 입력해 주세요.');
+      return;
+    }
+
+    setAuthStatus('loading');
+    setAuthMessage(authMode === 'register' ? '회원가입 중...' : '로그인 중...');
+
+    try {
+      const endpoint = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const body =
+        authMode === 'register'
+          ? {
+              userId,
+              password,
+              nickname,
+              age,
+              gender: authDraft.gender,
+            }
+          : {
+              userId,
+              password,
+            };
+
+      const response = await fetch(`${apiBase.replace(/\/$/, '')}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const payload = await readApiJson(response, authMode === 'register' ? '회원가입 실패:' : '로그인 실패:');
+
+      if (!response.ok) {
+        throw new Error(payload?.message || (authMode === 'register' ? '회원가입에 실패했습니다.' : '로그인에 실패했습니다.'));
+      }
+
+      applyAuthSuccess(payload, authMode === 'register' ? '회원가입 완료' : '로그인 완료');
+      setAuthDraft((current) => ({ ...current, password: '' }));
+    } catch (error) {
+      console.warn('Password auth failed', error);
+      setAuthStatus('error');
+      setAuthMessage(error instanceof Error ? error.message : '인증에 실패했습니다.');
+      showToast(authMode === 'register' ? '회원가입 실패' : '로그인 실패');
+    }
+  }
+
+  function signOutPasswordUser() {
+    setAuthUser(null);
+    setAuthStatus('idle');
+    setAuthMessage('로그아웃되었습니다.');
+    setActiveWorkspaceId(defaultWorkspaceId());
+    showToast('로그아웃 완료');
+  }
+
+  async function saveUserPlaceReview() {
+    if (!selectedPlace) return;
+
+    const comment = reviewDraft.comment.trim();
+    if (!comment) {
+      showToast('리뷰 댓글을 입력해 주세요');
+      return;
+    }
+
+    setReviewSaving(true);
+    try {
+      const savedReview = await savePlaceReviewToFirestore(detailPlaceKey(selectedPlace), {
+        placeName: selectedPlace.name,
+        rating: reviewDraft.rating,
+        comment,
+        createdAt: new Date().toISOString(),
+      });
+      setUserReviews((current) => [savedReview, ...current]);
+      setReviewDraft({ rating: 5, comment: '' });
+      showToast('내 리뷰를 저장했어요');
+    } catch (error) {
+      console.warn('Failed to save place review', error);
+      showToast(error instanceof Error ? error.message : '리뷰 저장에 실패했어요');
+    } finally {
+      setReviewSaving(false);
+    }
+  }
+
+  function focusMapOnPlace(place, zoom = 16) {
+    if (!placeCoordinate(place)) return;
+    [220, 720].forEach((delay) => {
+      setTimeout(() => {
+        mapRef.current?.focusPlace(place, zoom);
+      }, delay);
+    });
+  }
+
+  function fitMapToRoutePlaces(nextPlaces, padding = 110) {
+    const coordinates = nextPlaces.map(placeCoordinate).filter(Boolean);
+    if (coordinates.length === 0) return;
+    [280, 850].forEach((delay) => {
+      setTimeout(() => {
+        mapRef.current?.fitCoordinates(coordinates, padding);
+      }, delay);
+    });
   }
 
   async function pickScreenshot() {
@@ -703,14 +1251,19 @@ export default function App() {
     setPlaces((current) => [nextPlace, ...current]);
     savePlaceToFirestore(nextPlace)
       .then(() => showToast(`${nextPlace.name} DB 저장 완료`))
-      .catch(() => showToast('지도 저장 완료, DB 저장은 실패했어요'));
+      .catch((error) => {
+        console.warn('Failed to save place to Firestore', error);
+        showToast('지도에는 저장했지만 DB 저장은 실패했어요');
+      });
     setSelectedPlace(nextPlace);
     setDetailSheetVisible(true);
+    setDetailExpanded(false);
     setUploadedImage(null);
     setExtractResult(null);
     setVerification(null);
     setTab('map');
-    showToast(`${nextPlace.name} 지도 등록 완료`);
+    focusMapOnPlace(nextPlace);
+    showToast(`${nextPlace.name} 지도 등록 완료 · DB 저장 중`);
     setTimeout(() => {
       Alert.alert(
         '컬렉션에 저장하겠습니까?',
@@ -739,27 +1292,43 @@ export default function App() {
     setCollectionPickerPlace(place);
   }
 
+  function openRouteCollectionPicker(routeSnapshot) {
+    if (!routeSnapshot?.places?.length) {
+      showToast('저장할 동선이 없어요');
+      return;
+    }
+
+    if (collections.length === 0) {
+      setCollectionPickerRoute(routeSnapshot);
+      createCollection();
+      return;
+    }
+
+    setCollectionPickerRoute(routeSnapshot);
+  }
+
   function addPlaceToCollection(place, collectionId) {
     const nextColor = colorForCategory(place.category);
     const targetCollection = collections.find((collection) => collection.id === collectionId);
-    const nextCollection = targetCollection
-      ? {
-          ...targetCollection,
-          placeIds: targetCollection.placeIds.includes(place.id)
-            ? targetCollection.placeIds
-            : [place.id, ...targetCollection.placeIds],
-        }
-      : null;
+    const nextPlace = {
+      ...place,
+      pinColor: nextColor,
+      collectionIds: Array.from(new Set([...(place.collectionIds || []), collectionId])),
+    };
+    const placeSnapshot = compactCollectionPlace(nextPlace);
+    const mergeCollectionPlace = (collection) => {
+      const currentPlaceIds = Array.isArray(collection.placeIds) ? collection.placeIds : [];
+      const currentPlaces = Array.isArray(collection.places) ? collection.places : [];
+      return {
+        ...collection,
+        placeIds: currentPlaceIds.includes(place.id) ? currentPlaceIds : [place.id, ...currentPlaceIds],
+        places: [placeSnapshot, ...currentPlaces.filter((item) => item.id !== place.id)],
+      };
+    };
+    const nextCollection = targetCollection ? mergeCollectionPlace(targetCollection) : null;
     setCollections((current) =>
       current.map((collection) =>
-        collection.id === collectionId
-          ? {
-              ...collection,
-              placeIds: collection.placeIds.includes(place.id)
-                ? collection.placeIds
-                : [place.id, ...collection.placeIds],
-            }
-          : collection
+        collection.id === collectionId ? mergeCollectionPlace(collection) : collection
       )
     );
     setPlaces((current) =>
@@ -782,11 +1351,7 @@ export default function App() {
           }
         : current
     );
-    savePlaceToFirestore({
-      ...place,
-      pinColor: nextColor,
-      collectionIds: Array.from(new Set([...(place.collectionIds || []), collectionId])),
-    }).catch(() => {});
+    savePlaceToFirestore(nextPlace).catch(() => {});
     if (nextCollection) {
       saveCollectionToFirestore(nextCollection).catch(() => {});
     }
@@ -794,6 +1359,103 @@ export default function App() {
     setCollectionPickerPlace(null);
     const collectionName = collections.find((item) => item.id === collectionId)?.name || '컬렉션';
     showToast(`${collectionName}에 저장했어요`);
+  }
+
+  function addRouteToCollection(routeSnapshot, collectionId) {
+    const targetCollection = collections.find((collection) => collection.id === collectionId);
+    if (!targetCollection) return;
+
+    const nextRoutes = [
+      routeSnapshot,
+      ...(Array.isArray(targetCollection.routes) ? targetCollection.routes.filter((route) => route.id !== routeSnapshot.id) : []),
+    ];
+    const nextCollection = {
+      ...targetCollection,
+      routes: nextRoutes,
+    };
+
+    setCollections((current) =>
+      current.map((collection) =>
+        collection.id === collectionId
+          ? {
+              ...collection,
+              routes: nextRoutes,
+            }
+          : collection
+      )
+    );
+    setSelectedCollectionId(collectionId);
+    setCollectionPickerRoute(null);
+    saveRouteToFirestore(routeSnapshot).catch((error) => {
+      console.warn('Failed to save route to Firestore', error);
+    });
+    saveCollectionToFirestore(nextCollection).catch(() => {});
+    showToast(`${targetCollection.name}에 동선을 저장했어요`);
+  }
+
+  function createCurrentRouteSnapshot() {
+    const base = resolveRouteBasePlace();
+    const orderedPlaces = routePlaces.length ? routePlaces : base ? buildNearestRoute(base, places) : [];
+    if (!base || orderedPlaces.length === 0) return null;
+
+    return buildCollectionRouteSnapshot({
+      basePlace: base,
+      routePlaces: orderedPlaces,
+      visitDate: routeScheduleDate,
+      itinerary: aiGeneratedItinerary,
+      provider: routeScheduleProvider,
+    });
+  }
+
+  function saveCurrentRouteToCollection() {
+    const snapshot = createCurrentRouteSnapshot();
+    if (!snapshot) {
+      showToast('먼저 동선을 만들어 주세요');
+      return;
+    }
+    let nextSnapshot = snapshot;
+    if (Array.isArray(snapshot.itinerary) && snapshot.itinerary.length) {
+      const itinerarySnapshot = buildItinerarySnapshot({
+        routeSnapshot: snapshot,
+        basePlace: snapshot.basePlace,
+        routePlaces: snapshot.places || [],
+        visitDate: snapshot.visitDate,
+        itinerary: snapshot.itinerary,
+        provider: snapshot.provider,
+        region: getRegionOfAddress(snapshot.basePlace?.address),
+      });
+      nextSnapshot = { ...snapshot, itineraryId: itinerarySnapshot.id };
+      saveItineraryToFirestore(itinerarySnapshot).catch((error) => {
+        console.warn('Failed to save route itinerary to Firestore', error);
+      });
+    }
+    saveRouteToFirestore(nextSnapshot).catch((error) => {
+      console.warn('Failed to save route to Firestore', error);
+    });
+    openRouteCollectionPicker(nextSnapshot);
+  }
+
+  function openSavedCollectionRoute(routeSnapshot) {
+    const base =
+      places.find((place) => place.id === routeSnapshot.basePlace?.id) ||
+      routeSnapshot.basePlace ||
+      null;
+    const restoredPlaces = (routeSnapshot.placeIds || [])
+      .map((placeId) => places.find((place) => place.id === placeId))
+      .filter(Boolean);
+    const fallbackPlaces = restoredPlaces.length ? restoredPlaces : routeSnapshot.places || [];
+
+    setRouteBasePlace(base);
+    setRouteBaseQuery(base?.name || '');
+    setRoutePlaces(fallbackPlaces);
+    setRouteScheduleDate(routeSnapshot.visitDate || routeScheduleDate);
+    setAiGeneratedItinerary(Array.isArray(routeSnapshot.itinerary) && routeSnapshot.itinerary.length ? routeSnapshot.itinerary : null);
+    setRouteScheduleProvider(routeSnapshot.provider || '');
+    setTab('map');
+    setRouteSelectMode(true);
+    setRouteSearchOpen(false);
+    fitMapToRoutePlaces([base, ...fallbackPlaces].filter(Boolean));
+    showToast(`${routeSnapshot.title || '저장된 동선'}을 불러왔어요`);
   }
 
   function createCollection() {
@@ -809,12 +1471,23 @@ export default function App() {
   function saveCreatedCollection() {
     const nextIndex = collections.length + 1;
     const draftName = collectionDraft.name.trim() || `새 컬렉션 ${nextIndex}`;
+    const initialRoutes = collectionPickerRoute ? [collectionPickerRoute] : [];
+    const nextCollectionId = `collection-${Date.now()}`;
+    const initialPlace = collectionPickerPlace
+      ? {
+          ...collectionPickerPlace,
+          pinColor: colorForCategory(collectionPickerPlace.category),
+          collectionIds: Array.from(new Set([...(collectionPickerPlace.collectionIds || []), nextCollectionId])),
+        }
+      : null;
     const nextCollection = {
-      id: `collection-${Date.now()}`,
+      id: nextCollectionId,
       name: draftName,
       color: collectionDraft.color,
       icon: collectionDraft.icon,
-      placeIds: collectionPickerPlace ? [collectionPickerPlace.id] : [],
+      placeIds: initialPlace ? [initialPlace.id] : [],
+      places: initialPlace ? [compactCollectionPlace(initialPlace)] : [],
+      routes: initialRoutes,
       createdAt: Date.now(),
     };
     setCollections((current) => [nextCollection, ...current]);
@@ -848,20 +1521,18 @@ export default function App() {
             }
           : current
       );
-      savePlaceToFirestore({
-        ...collectionPickerPlace,
-        pinColor: nextColor,
-        collectionIds: Array.from(new Set([...(collectionPickerPlace.collectionIds || []), nextCollection.id])),
-      }).catch(() => {});
+      savePlaceToFirestore(initialPlace).catch(() => {});
       saveCollectionToFirestore(nextCollection).catch(() => {});
       setCollectionPickerPlace(null);
+      setCollectionPickerRoute(null);
       setCollectionCreatorOpen(false);
       showToast(`${nextCollection.name}에 저장했어요`);
       return;
     }
     saveCollectionToFirestore(nextCollection).catch(() => {});
+    setCollectionPickerRoute(null);
     setCollectionCreatorOpen(false);
-    showToast(`${nextCollection.name} 생성 완료`);
+    showToast(initialRoutes.length ? `${nextCollection.name}에 동선을 저장했어요` : `${nextCollection.name} 생성 완료`);
   }
 
   function deleteSelectedCollection() {
@@ -919,11 +1590,19 @@ export default function App() {
     showToast('기준 장소를 검색해서 스마트 동선을 만들어요');
   }
 
-  function selectRouteBase(place) {
+  async function selectRouteBase(place) {
     setRouteBasePlace(place);
     setRouteBaseQuery(place.name);
     setRouteSearchOpen(false);
-    const nextRoute = buildNearestRoute(place, places);
+    let nextRoute = buildNearestRoute(place, places);
+    try {
+      const backendRoute = await requestSmartRouteFromBackend(place);
+      if (backendRoute?.length) {
+        nextRoute = backendRoute;
+      }
+    } catch (error) {
+      console.warn('Backend smart route failed; using local fallback', error);
+    }
     setRoutePlaces(nextRoute);
     showToast(`${place.name} 기준 동선 후보를 정리했어요`);
   }
@@ -935,7 +1614,27 @@ export default function App() {
     return places.find((place) => `${place.name} ${place.address}`.toLowerCase().includes(text) && placeCoordinate(place)) || null;
   }
 
-  function completeSmartRoute() {
+  async function requestSmartRouteFromBackend(base) {
+    const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL;
+    if (!apiBase) return null;
+
+    const response = await fetch(`${apiBase.replace(/\/$/, '')}/api/routes/smart-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        basePlace: base,
+        places,
+        limit: 6,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.message || '백엔드 스마트 동선 생성에 실패했습니다.');
+    }
+    return Array.isArray(payload.routePlaces) ? payload.routePlaces : null;
+  }
+
+  async function completeSmartRoute() {
     const base = resolveRouteBasePlace();
     if (!base) {
       setRouteSearchOpen(true);
@@ -943,7 +1642,16 @@ export default function App() {
       return null;
     }
 
-    const nextRoute = buildNearestRoute(base, places);
+    let nextRoute = buildNearestRoute(base, places);
+    try {
+      const backendRoute = await requestSmartRouteFromBackend(base);
+      if (backendRoute?.length) {
+        nextRoute = backendRoute;
+      }
+    } catch (error) {
+      console.warn('Backend smart route failed; using local fallback', error);
+    }
+
     if (nextRoute.length === 0) {
       showToast('기준점 주변에 동선을 만들 저장 장소가 없어요');
       return null;
@@ -953,12 +1661,30 @@ export default function App() {
     setRouteBaseQuery(base.name);
     setRoutePlaces(nextRoute);
     setAiSelectedRegion(getRegionOfAddress(base.address));
+    saveRouteToFirestore(
+      buildCollectionRouteSnapshot({
+        basePlace: base,
+        routePlaces: nextRoute,
+        visitDate: routeScheduleDate,
+        itinerary: [],
+        provider: 'nearest-distance',
+      })
+    ).catch((error) => {
+      console.warn('Failed to save smart route to Firestore', error);
+    });
     showToast(`${base.name} 기준으로 가까운 순서 동선을 만들었어요`);
     return { base, route: nextRoute };
   }
 
+  async function finishSmartRouteSelection() {
+    if (routeBasePlace || routeBaseQuery.trim()) {
+      await completeSmartRoute();
+    }
+    closeRouteSelectMode();
+  }
+
   async function openSmartSchedulePage() {
-    const result = completeSmartRoute();
+    const result = await completeSmartRoute();
     if (!result) return;
     setRouteSelectMode(false);
     setRouteScheduleOpen(true);
@@ -1014,6 +1740,28 @@ export default function App() {
     setAiGeneratedItinerary(nextItinerary);
     setRouteScheduleProvider(provider);
     setRouteScheduleLoading(false);
+    const routeSnapshot = buildCollectionRouteSnapshot({
+      basePlace: base,
+      routePlaces: orderedPlaces,
+      visitDate: routeScheduleDate,
+      itinerary: nextItinerary,
+      provider,
+    });
+    const itinerarySnapshot = buildItinerarySnapshot({
+      routeSnapshot,
+      basePlace: base,
+      routePlaces: orderedPlaces,
+      visitDate: routeScheduleDate,
+      itinerary: nextItinerary,
+      provider,
+      region: getRegionOfAddress(base.address),
+    });
+    saveRouteToFirestore({ ...routeSnapshot, itineraryId: itinerarySnapshot.id }).catch((error) => {
+      console.warn('Failed to save generated route to Firestore', error);
+    });
+    saveItineraryToFirestore(itinerarySnapshot).catch((error) => {
+      console.warn('Failed to save itinerary to Firestore', error);
+    });
     showToast(provider === 'gemini' ? 'Gemini AI 일정표 생성 완료' : '기본 AI 일정표 생성 완료');
   }
 
@@ -1034,15 +1782,16 @@ export default function App() {
       showToast('공유를 열지 못했어요');
     }
   }
-
   function handleMapSelectPlace(placeId) {
     const nextPlace = places.find((place) => place.id === placeId);
     if (nextPlace) {
       setSelectedPlace(nextPlace);
       setDetailSheetVisible(true);
+      setDetailExpanded(false);
       setRouteExplore({ status: 'idle', selectedMode: '', routes: [], message: '' });
       setTransitRealtime({ status: 'idle', message: '', buses: [], subwayMessage: '' });
       mapRef.current?.clearRoutePolyline();
+      focusMapOnPlace(nextPlace);
     }
   }
 
@@ -1071,9 +1820,11 @@ export default function App() {
 
     setSelectedPlace(nextPlace);
     setDetailSheetVisible(true);
+    setDetailExpanded(false);
     setRouteExplore({ status: 'idle', selectedMode: '', routes: [], message: '' });
     setTransitRealtime({ status: 'idle', message: '', buses: [], subwayMessage: '' });
     mapRef.current?.clearRoutePolyline();
+    focusMapOnPlace(nextPlace);
   }
 
   function handleRouteCircleSelected(payload) {
@@ -1262,7 +2013,10 @@ export default function App() {
             userLocation={userLocation}
             onSelectPlace={handleMapSelectPlace}
             onExternalPlace={handleExternalPlace}
-            onMapPress={() => setDetailSheetVisible(false)}
+            onMapPress={() => {
+              setDetailSheetVisible(false);
+              setDetailExpanded(false);
+            }}
             onStatusChange={setMapStatus}
             onRouteChange={setRouteInfo}
             onRouteCircleSelected={handleRouteCircleSelected}
@@ -1320,96 +2074,258 @@ export default function App() {
             <Ionicons name="git-merge-outline" size={22} color="#FFFFFF" />
           </TouchableOpacity>
 
-          {selectedPlace && detailSheetVisible && (
-            <Glass style={styles.detailSheet}>
-              <View style={styles.detailTop}>
-                <View style={[styles.detailIcon, { backgroundColor: colorForCategory(selectedPlace.category) }]}>
-                  <Ionicons name={iconForCategory(selectedPlace.category)} size={20} color="#FFFFFF" />
+          {selectedPlace && detailSheetVisible && !detailExpanded ? (
+            <Animated.View style={[styles.detailMiniAnimated, { height: detailMiniHeight }]}>
+              <Glass style={styles.detailSheet}>
+                <View {...detailSheetResponder.panHandlers}>
+                  <View style={styles.detailDragHandle} />
+                  <View style={styles.detailTopCompact}>
+                    <View style={[styles.detailIcon, { backgroundColor: colorForCategory(selectedPlace.category) }]}>
+                      <Ionicons name={iconForCategory(selectedPlace.category)} size={20} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.detailTitle} numberOfLines={1}>{selectedPlace.name}</Text>
+                      <Text style={styles.detailMeta} numberOfLines={1}>{selectedPlace.category}</Text>
+                    </View>
+                    <Ionicons name="chevron-up" size={20} color="#8B95A1" />
+                  </View>
                 </View>
-                <View style={styles.flex}>
-                  <Text style={styles.detailTitle}>{selectedPlace.name}</Text>
-                  <Text style={styles.detailMeta}>
-                    {selectedPlace.category} · AI {Math.round((selectedPlace.confidence || 0.85) * 100)}%
-                    {routeInfo.status === 'ready' && routeInfo.durationText ? ` · ${routeInfo.durationText}` : ''}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.detailDesc}>{selectedPlace.reviewSummary}</Text>
-              <View style={styles.infoGrid}>
-                <View style={styles.infoBox}>
-                  <Text style={styles.infoLabel}>영업시간</Text>
-                  <Text style={styles.infoText}>{selectedPlace.hours}</Text>
-                </View>
-                <View style={styles.infoBox}>
-                  <Text style={styles.infoLabel}>대표 메뉴</Text>
-                  <Text style={styles.infoText}>{normalizeMenu(selectedPlace.menu)}</Text>
-                </View>
-              </View>
-              <TouchableOpacity
-                style={styles.routeExploreButton}
-                activeOpacity={0.86}
-                onPress={exploreSelectedPlaceRoute}
-                disabled={routeExplore.status === 'loading'}
-              >
-                {routeExplore.status === 'loading' ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
-                ) : (
-                  <Ionicons name="navigate-outline" size={18} color="#FFFFFF" />
-                )}
-                <Text style={styles.routeExploreButtonText}>
-                  {routeExplore.status === 'loading' ? '경로 계산 중' : '경로 탐색'}
-                </Text>
-              </TouchableOpacity>
+              </Glass>
+            </Animated.View>
+          ) : null}
 
-              {routeExplore.routes.length > 0 || routeExplore.message ? (
-                <View style={styles.routeModeRow}>
-                  {routeExploreModes.map((mode) => {
-                    const route = routeExplore.routes.find((item) => item.mode === mode.key);
-                    const ready = route?.status === 'ready';
-                    const selected = routeExplore.selectedMode === mode.key;
+          {selectedPlace && detailSheetVisible && detailExpanded ? (
+            <View style={styles.detailFullPage}>
+              <View style={styles.detailFullHeader}>
+                <TouchableOpacity style={styles.detailBackButton} activeOpacity={0.78} onPress={collapseDetailToMini}>
+                  <Ionicons name="chevron-back" size={24} color="#111827" />
+                </TouchableOpacity>
+                <View style={styles.flex}>
+                  <Text style={styles.detailFullTitle} numberOfLines={1}>{selectedPlace.name}</Text>
+                  <Text style={styles.detailMeta} numberOfLines={1}>{selectedPlace.category}</Text>
+                </View>
+              </View>
+
+              <ScrollView contentContainerStyle={styles.detailFullContent} showsVerticalScrollIndicator={false}>
+                <View style={styles.detailTop}>
+                  <View style={[styles.detailIcon, { backgroundColor: colorForCategory(selectedPlace.category) }]}> 
+                    <Ionicons name={iconForCategory(selectedPlace.category)} size={20} color="#FFFFFF" />
+                  </View>
+                  <View style={styles.flex}>
+                    <Text style={styles.detailTitle}>{selectedPlace.name}</Text>
+                    <Text style={styles.detailMeta}>
+                      {selectedPlace.category} ? AI {Math.round((selectedPlace.confidence || 0.85) * 100)}%
+                      {routeInfo.status === 'ready' && routeInfo.durationText ? ` ? ${routeInfo.durationText}` : ''}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.detailDesc}>{selectedPlace.reviewSummary}</Text>
+                <View style={styles.infoGrid}>
+                  <View style={styles.infoBox}>
+                    <Text style={styles.infoLabel}>{'영업시간'}</Text>
+                    <Text style={styles.infoText}>{selectedPlace.hours}</Text>
+                  </View>
+                  <View style={styles.infoBox}>
+                    <Text style={styles.infoLabel}>{'대표 메뉴'}</Text>
+                    <Text style={styles.infoText}>{normalizeMenu(selectedPlace.menu)}</Text>
+                  </View>
+                </View>
+                <View style={styles.detailTabRow}>
+                  {[
+                    ['photos', '사진', 'images-outline'],
+                    ['reviews', '리뷰', 'chatbubble-ellipses-outline'],
+                  ].map(([key, label, icon]) => {
+                    const active = detailTab === key;
                     return (
                       <TouchableOpacity
-                        key={mode.key}
-                        style={[styles.routeModeChip, selected && styles.routeModeChipOn, !ready && styles.routeModeChipOff]}
-                        activeOpacity={ready ? 0.82 : 1}
-                        onPress={() => ready && renderRouteMode(route)}
+                        key={key}
+                        style={[styles.detailTabButton, active && styles.detailTabButtonOn]}
+                        activeOpacity={0.82}
+                        onPress={() => setDetailTab(key)}
                       >
-                        <Ionicons name={mode.icon} size={15} color={selected ? '#FFFFFF' : ready ? '#E53935' : '#8B95A1'} />
-                        <Text style={[styles.routeModeLabel, selected && styles.routeModeLabelOn]}>
-                          {mode.label}
-                        </Text>
-                        <Text style={[styles.routeModeValue, selected && styles.routeModeLabelOn]}>
-                          {ready ? route.durationText || route.distanceText : '불가'}
-                        </Text>
+                        <Ionicons name={icon} size={16} color={active ? '#FFFFFF' : '#4E5968'} />
+                        <Text style={[styles.detailTabText, active && styles.detailTabTextOn]}>{label}</Text>
                       </TouchableOpacity>
                     );
                   })}
-                  {routeExplore.message ? <Text style={styles.routeExploreMessage}>{routeExplore.message}</Text> : null}
-                  {routeExplore.selectedMode === 'TRANSIT' && transitRealtime.status !== 'idle' ? (
-                    <View style={styles.transitRealtimeBox}>
-                      <View style={styles.transitRealtimeHeader}>
-                        <Ionicons name="radio-outline" size={15} color="#3182F6" />
-                        <Text style={styles.transitRealtimeTitle}>실시간 대중교통</Text>
-                      </View>
-                      <Text style={styles.transitRealtimeText}>
-                        {transitRealtime.status === 'loading'
-                          ? '실시간 정보를 불러오는 중...'
-                          : transitRealtime.message || '실시간 정보가 없습니다.'}
+                </View>
+
+                {detailTab === 'photos' ? (
+                  <View style={styles.detailTabPanel}>
+                    <View style={styles.detailSectionTop}>
+                      <Text style={styles.detailSectionTitle}>Google 사진</Text>
+                      {googlePlaceDetails.status === 'loading' ? <ActivityIndicator size="small" color="#3182F6" /> : null}
+                    </View>
+                    {googlePlaceDetails.photos.length ? (
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.photoRail}>
+                        {googlePlaceDetails.photos.map((photo, index) => {
+                          const uri = googlePhotoUrl(photo);
+                          if (!uri) return null;
+                          return <Image key={`${photo.reference || uri}-${index}`} source={{ uri }} style={styles.placePhoto} />;
+                        })}
+                      </ScrollView>
+                    ) : (
+                      <Text style={styles.emptyInlineText}>
+                        {googlePlaceDetails.message || 'Google에서 가져올 수 있는 사진이 아직 없어요.'}
                       </Text>
-                      {transitRealtime.buses.slice(0, 3).map((bus, index) => (
-                        <Text key={`${bus.vehicleNo || bus.nodeId || index}`} style={styles.transitRealtimeText}>
-                          {bus.vehicleNo || '버스'} · {bus.nodeName || '현재 위치 확인 중'}
+                    )}
+
+                    <View style={styles.detailSectionTop}>
+                      <Text style={styles.detailSectionTitle}>Google 리뷰</Text>
+                      {googlePlaceDetails.rating ? (
+                        <Text style={styles.googleReviewMeta}>
+                          {googlePlaceDetails.rating}점 · {googlePlaceDetails.userRatingsTotal || 0}개
                         </Text>
-                      ))}
-                      {transitRealtime.subwayMessage ? (
-                        <Text style={styles.transitRealtimeMuted}>{transitRealtime.subwayMessage}</Text>
                       ) : null}
                     </View>
-                  ) : null}
-                </View>
-              ) : null}
-            </Glass>
-          )}
+                    {googlePlaceDetails.reviews.length ? (
+                      googlePlaceDetails.reviews.map((review, index) => (
+                        <View key={`${review.authorName}-${review.time || index}`} style={styles.googleReviewCard}>
+                          <View style={styles.googleReviewTop}>
+                            <View style={styles.flex}>
+                              <Text style={styles.googleReviewAuthor}>{review.authorName}</Text>
+                              <Text style={styles.googleReviewMeta}>{review.relativeTime}</Text>
+                            </View>
+                            <View style={styles.starRow}>
+                              {ratingStars(review.rating).map((star, starIndex) => (
+                                <Ionicons key={`${star}-${starIndex}`} name={star} size={14} color="#FFB800" />
+                              ))}
+                            </View>
+                          </View>
+                          <Text style={styles.googleReviewText}>{review.text || '리뷰 내용이 비어 있어요.'}</Text>
+                        </View>
+                      ))
+                    ) : (
+                      <Text style={styles.emptyInlineText}>
+                        {googlePlaceDetails.status === 'loading' ? 'Google 리뷰를 불러오는 중...' : 'Google 리뷰가 아직 없어요.'}
+                      </Text>
+                    )}
+                  </View>
+                ) : (
+                  <View style={styles.detailTabPanel}>
+                    <View style={styles.reviewComposer}>
+                      <Text style={styles.detailSectionTitle}>내 별점</Text>
+                      <View style={styles.starRow}>
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <TouchableOpacity
+                            key={star}
+                            style={styles.starButton}
+                            activeOpacity={0.75}
+                            onPress={() => setReviewDraft((current) => ({ ...current, rating: star }))}
+                          >
+                            <Ionicons name={star <= reviewDraft.rating ? 'star' : 'star-outline'} size={26} color="#FFB800" />
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      <TextInput
+                        value={reviewDraft.comment}
+                        onChangeText={(comment) => setReviewDraft((current) => ({ ...current, comment }))}
+                        placeholder="이 장소에 대한 내 리뷰를 남겨보세요."
+                        placeholderTextColor="#8B95A1"
+                        multiline
+                        style={styles.reviewInput}
+                      />
+                      <TouchableOpacity
+                        style={[styles.reviewSaveButton, reviewSaving && styles.aiGenerateButtonOff]}
+                        activeOpacity={0.86}
+                        disabled={reviewSaving}
+                        onPress={saveUserPlaceReview}
+                      >
+                        {reviewSaving ? <ActivityIndicator size="small" color="#FFFFFF" /> : <Ionicons name="checkmark" size={18} color="#FFFFFF" />}
+                        <Text style={styles.reviewSaveText}>{reviewSaving ? '저장 중' : '리뷰 저장'}</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={styles.detailSectionTop}>
+                      <Text style={styles.detailSectionTitle}>내가 남긴 리뷰</Text>
+                      <Text style={styles.googleReviewMeta}>{userReviews.length}개</Text>
+                    </View>
+                    {userReviews.length ? (
+                      userReviews.map((review) => (
+                        <View key={review.id} style={styles.userReviewCard}>
+                          <View style={styles.googleReviewTop}>
+                            <Text style={styles.googleReviewAuthor}>내 리뷰</Text>
+                            <View style={styles.starRow}>
+                              {ratingStars(review.rating).map((star, starIndex) => (
+                                <Ionicons key={`${review.id}-${starIndex}`} name={star} size={14} color="#FFB800" />
+                              ))}
+                            </View>
+                          </View>
+                          <Text style={styles.googleReviewText}>{review.comment}</Text>
+                          <Text style={styles.googleReviewMeta}>{new Date(review.createdAt).toLocaleString()}</Text>
+                        </View>
+                      ))
+                    ) : (
+                      <Text style={styles.emptyInlineText}>아직 이 장소에 남긴 리뷰가 없어요.</Text>
+                    )}
+                  </View>
+                )}
+                <TouchableOpacity
+                  style={styles.routeExploreButton}
+                  activeOpacity={0.86}
+                  onPress={exploreSelectedPlaceRoute}
+                  disabled={routeExplore.status === 'loading'}
+                >
+                  {routeExplore.status === 'loading' ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Ionicons name="navigate-outline" size={18} color="#FFFFFF" />
+                  )}
+                  <Text style={styles.routeExploreButtonText}>
+                    {routeExplore.status === 'loading' ? '경로 계산 중' : '경로 탐색'}
+                  </Text>
+                </TouchableOpacity>
+
+                {routeExplore.routes.length > 0 || routeExplore.message ? (
+                  <View style={styles.routeModeRow}>
+                    {routeExploreModes.map((mode) => {
+                      const route = routeExplore.routes.find((item) => item.mode === mode.key);
+                      const ready = route?.status === 'ready';
+                      const selected = routeExplore.selectedMode === mode.key;
+                      return (
+                        <TouchableOpacity
+                          key={mode.key}
+                          style={[styles.routeModeChip, selected && styles.routeModeChipOn, !ready && styles.routeModeChipOff]}
+                          activeOpacity={ready ? 0.82 : 1}
+                          onPress={() => ready && renderRouteMode(route)}
+                        >
+                          <Ionicons name={mode.icon} size={15} color={selected ? '#FFFFFF' : ready ? '#E53935' : '#8B95A1'} />
+                          <Text style={[styles.routeModeLabel, selected && styles.routeModeLabelOn]}>
+                            {mode.label}
+                          </Text>
+                          <Text style={[styles.routeModeValue, selected && styles.routeModeLabelOn]}>
+                            {ready ? route.durationText || route.distanceText : '불가'}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                    {routeExplore.message ? <Text style={styles.routeExploreMessage}>{routeExplore.message}</Text> : null}
+                    {routeExplore.selectedMode === 'TRANSIT' && transitRealtime.status !== 'idle' ? (
+                      <View style={styles.transitRealtimeBox}>
+                        <View style={styles.transitRealtimeHeader}>
+                          <Ionicons name="radio-outline" size={15} color="#3182F6" />
+                          <Text style={styles.transitRealtimeTitle}>{'실시간 대중교통'}</Text>
+                        </View>
+                        <Text style={styles.transitRealtimeText}>
+                          {transitRealtime.status === 'loading'
+                            ? '실시간 정보를 불러오는 중...'
+                            : transitRealtime.message || '실시간 정보가 없습니다.'}
+                        </Text>
+                        {transitRealtime.buses.slice(0, 3).map((bus, index) => (
+                          <Text key={`${bus.vehicleNo || bus.nodeId || index}`} style={styles.transitRealtimeText}>
+                            {bus.vehicleNo || '버스'} ? {bus.nodeName || '현재 위치 확인 중'}
+                          </Text>
+                        ))}
+                        {transitRealtime.subwayMessage ? (
+                          <Text style={styles.transitRealtimeMuted}>{transitRealtime.subwayMessage}</Text>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+              </ScrollView>
+            </View>
+          ) : null}
         </View>
       )}
 
@@ -1552,7 +2468,9 @@ export default function App() {
                     <Ionicons name={collection.icon || 'albums-outline'} size={14} color="#FFFFFF" />
                   </View>
                   <Text style={[styles.collectionTabText, active && styles.collectionTabTextOn]}>{collection.name}</Text>
-                  <Text style={[styles.collectionTabCount, active && styles.collectionTabTextOn]}>{collection.placeIds.length}</Text>
+                  <Text style={[styles.collectionTabCount, active && styles.collectionTabTextOn]}>
+                    {(collection.placeIds?.length || 0) + (collection.routes?.length || 0)}
+                  </Text>
                 </TouchableOpacity>
               );
             })}
@@ -1561,31 +2479,63 @@ export default function App() {
           {selectedCollection ? (
             <Glass style={styles.card}>
               <Text style={styles.resultConfidence}>{selectedCollection.name}</Text>
-              <Text style={styles.resultTitle}>{selectedCollectionPlaces.length}곳 저장됨</Text>
-              {selectedCollectionPlaces.length === 0 ? (
+              <Text style={styles.resultTitle}>
+                {selectedCollectionPlaces.length}곳 · 동선 {selectedCollectionRoutes.length}개
+              </Text>
+              {selectedCollectionPlaces.length === 0 && selectedCollectionRoutes.length === 0 ? (
                 <Text style={styles.detailDesc}>캡처 분석 후 지도에 등록할 때 컬렉션 저장을 선택하면 여기에 쌓입니다.</Text>
               ) : (
-                selectedCollectionPlaces.map((place) => (
-                  <TouchableOpacity
-                    key={place.id}
-                    style={styles.collectionPlaceRow}
-                    activeOpacity={0.82}
-                    onPress={() => {
-                      setSelectedPlace(place);
-                      setDetailSheetVisible(true);
-                      setTab('map');
-                    }}
+                <>
+                  {selectedCollectionPlaces.map((place) => (
+                    <TouchableOpacity
+                      key={place.id}
+                      style={styles.collectionPlaceRow}
+                      activeOpacity={0.82}
+                      onPress={() => {
+                        if (place.missing) {
+                          showToast('장소 원본 데이터가 아직 동기화되지 않았어요');
+                          return;
+                        }
+                        setSelectedPlace(place);
+                        setDetailSheetVisible(true);
+                        setDetailExpanded(false);
+                        setTab('map');
+                        focusMapOnPlace(place);
+                      }}
                   >
-                    <View style={[styles.collectionPlaceIcon, { backgroundColor: colorForCategory(place.category) }]}>
-                      <Ionicons name={iconForCategory(place.category)} size={16} color="#FFFFFF" />
-                    </View>
-                    <View style={styles.flex}>
-                      <Text style={styles.routeTitle}>{place.name}</Text>
-                      <Text style={styles.routeMeta}>{place.category} · {place.address}</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={18} color="#8B95A1" />
-                  </TouchableOpacity>
-                ))
+                      <View style={[styles.collectionPlaceIcon, { backgroundColor: colorForCategory(place.category) }]}>
+                        <Ionicons name={iconForCategory(place.category)} size={16} color="#FFFFFF" />
+                      </View>
+                      <View style={styles.flex}>
+                        <Text style={styles.routeTitle}>{place.name}</Text>
+                        <Text style={styles.routeMeta}>{place.category} · {place.address}</Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color="#8B95A1" />
+                    </TouchableOpacity>
+                  ))}
+                  {selectedCollectionRoutes.map((route) => (
+                    <TouchableOpacity
+                      key={route.id}
+                      style={styles.collectionRouteRow}
+                      activeOpacity={0.82}
+                      onPress={() => openSavedCollectionRoute(route)}
+                    >
+                      <View style={[styles.collectionPlaceIcon, { backgroundColor: selectedCollection.color }]}>
+                        <Ionicons name="git-merge-outline" size={16} color="#FFFFFF" />
+                      </View>
+                      <View style={styles.flex}>
+                        <Text style={styles.routeTitle}>{route.title || '저장된 스마트 동선'}</Text>
+                        <Text style={styles.routeMeta}>
+                          {(route.places?.length || route.placeIds?.length || 0)}곳 · {route.visitDate || '날짜 미정'}
+                        </Text>
+                        <Text style={styles.collectionRouteSteps} numberOfLines={1}>
+                          {(route.places || []).map((place) => place.name).join(' → ')}
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color="#8B95A1" />
+                    </TouchableOpacity>
+                  ))}
+                </>
               )}
             </Glass>
           ) : (
@@ -1598,12 +2548,138 @@ export default function App() {
       )}
 
       {tab === 'settings' && (
-        <ScrollView contentContainerStyle={styles.page}>
+        <ScrollView contentContainerStyle={[styles.page, styles.settingsPage]}>
           <Text style={styles.pageTitle}>설정</Text>
           <Glass style={styles.card}>
-            <Text style={styles.cardTitle}>PinSnap Archive</Text>
-            <Text style={styles.detailDesc}>캡처 이미지는 서버의 Gemini API로 분석하고, 저장한 장소는 Firestore에 동기화됩니다.</Text>
+            <View style={styles.authHeader}>
+              <View style={styles.authAvatarFallback}>
+                <Ionicons name="person-outline" size={24} color="#3182F6" />
+              </View>
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle}>{authUser ? `${authUser.nickname}님` : '계정 로그인'}</Text>
+                <Text style={styles.settingDesc}>
+                  {authUser ? `${authUser.userId} · ${authUser.age}세 · ${genderLabel(authUser.gender)}` : '아이디와 비밀번호로 내 장소와 컬렉션을 계정별로 저장합니다.'}
+                </Text>
+              </View>
+            </View>
+
+            {authUser ? (
+              <>
+                <View style={styles.authWorkspaceBox}>
+                  <Text style={styles.authLabel}>데이터 저장 공간</Text>
+                  <Text style={styles.authWorkspaceText} numberOfLines={1}>
+                    {currentWorkspaceId}
+                  </Text>
+                </View>
+                <TouchableOpacity style={styles.secondaryButton} activeOpacity={0.82} onPress={signOutPasswordUser}>
+                  <Ionicons name="log-out-outline" size={18} color="#3182F6" />
+                  <Text style={styles.secondaryButtonText}>로그아웃</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <View style={styles.authModeRow}>
+                  {[
+                    ['login', '로그인'],
+                    ['register', '회원가입'],
+                  ].map(([key, label]) => (
+                    <TouchableOpacity
+                      key={key}
+                      style={[styles.authModeButton, authMode === key && styles.authModeButtonOn]}
+                      activeOpacity={0.82}
+                      onPress={() => {
+                        setAuthMode(key);
+                        setAuthMessage('');
+                      }}
+                    >
+                      <Text style={[styles.authModeText, authMode === key && styles.authModeTextOn]}>{label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <Text style={styles.fieldLabel}>아이디</Text>
+                <TextInput
+                  value={authDraft.userId}
+                  onChangeText={(value) => updateAuthDraft('userId', value)}
+                  placeholder="영문/숫자 4~20자"
+                  placeholderTextColor="#8B95A1"
+                  autoCapitalize="none"
+                  style={styles.fieldInput}
+                />
+
+                <Text style={styles.fieldLabel}>비밀번호</Text>
+                <TextInput
+                  value={authDraft.password}
+                  onChangeText={(value) => updateAuthDraft('password', value)}
+                  placeholder="6자 이상"
+                  placeholderTextColor="#8B95A1"
+                  secureTextEntry
+                  style={styles.fieldInput}
+                />
+
+                {authMode === 'register' ? (
+                  <>
+                    <Text style={styles.fieldLabel}>닉네임</Text>
+                    <TextInput
+                      value={authDraft.nickname}
+                      onChangeText={(value) => updateAuthDraft('nickname', value)}
+                      placeholder="예: 성수탐험가"
+                      placeholderTextColor="#8B95A1"
+                      style={styles.fieldInput}
+                    />
+
+                    <Text style={styles.fieldLabel}>나이</Text>
+                    <TextInput
+                      value={authDraft.age}
+                      onChangeText={(value) => updateAuthDraft('age', value.replace(/[^0-9]/g, ''))}
+                      placeholder="숫자만 입력"
+                      placeholderTextColor="#8B95A1"
+                      keyboardType="number-pad"
+                      style={styles.fieldInput}
+                    />
+
+                    <Text style={styles.fieldLabel}>성별</Text>
+                    <View style={styles.authGenderRow}>
+                      {[
+                        ['none', '선택 안 함'],
+                        ['female', '여성'],
+                        ['male', '남성'],
+                        ['other', '기타'],
+                      ].map(([key, label]) => (
+                        <TouchableOpacity
+                          key={key}
+                          style={[styles.authGenderChip, authDraft.gender === key && styles.authGenderChipOn]}
+                          activeOpacity={0.82}
+                          onPress={() => updateAuthDraft('gender', key)}
+                        >
+                          <Text style={[styles.authGenderText, authDraft.gender === key && styles.authGenderTextOn]}>{label}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </>
+                ) : null}
+
+                <TouchableOpacity
+                  style={[styles.primaryButton, authStatus === 'loading' && styles.authButtonDisabled]}
+                  activeOpacity={0.86}
+                  onPress={submitPasswordAuth}
+                  disabled={authStatus === 'loading'}
+                >
+                  {authStatus === 'loading' ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="person-circle-outline" size={20} color="#FFFFFF" />}
+                  <Text style={styles.primaryButtonText}>
+                    {authStatus === 'loading' ? '처리 중...' : authMode === 'register' ? '회원가입하기' : '로그인하기'}
+                  </Text>
+                </TouchableOpacity>
+                <Text style={styles.authMessage}>
+                  {authMode === 'register' ? '가입 정보는 Firestore users 컬렉션에 저장되고, 비밀번호는 해시로만 보관됩니다.' : '회원가입한 아이디와 비밀번호로 로그인해 주세요.'}
+                </Text>
+              </>
+            )}
+
+            {authMessage ? <Text style={styles.authMessage}>{authMessage}</Text> : null}
           </Glass>
+
+          
         </ScrollView>
       )}
 
@@ -1637,8 +2713,8 @@ export default function App() {
               <Ionicons name="search-outline" size={18} color="#FFFFFF" />
             </View>
             <TouchableOpacity style={styles.flex} activeOpacity={0.82} onPress={() => setRouteSearchOpen(true)}>
-              <Text style={styles.routeGuideTitle}>?? ?? ??</Text>
-              <Text style={styles.routeGuideSub}>{routeBasePlace ? routeBasePlace.name : '??? ?? ??? ??? ???'}</Text>
+              <Text style={styles.routeGuideTitle}>동선 영역 검색</Text>
+              <Text style={styles.routeGuideSub}>{routeBasePlace ? routeBasePlace.name : '숙소나 기준 장소를 입력해 주세요'}</Text>
             </TouchableOpacity>
             <TouchableOpacity activeOpacity={0.78} onPress={closeRouteSelectMode}>
               <Ionicons name="close" size={22} color="#111827" />
@@ -1652,7 +2728,7 @@ export default function App() {
                 <TextInput
                   value={routeBaseQuery}
                   onChangeText={setRouteBaseQuery}
-                  placeholder="?? ??, ???, ?? ??"
+                  placeholder="숙소 이름, 장소명, 주소 검색"
                   placeholderTextColor="#8B95A1"
                   style={styles.routeSearchInput}
                   autoFocus
@@ -1671,7 +2747,7 @@ export default function App() {
                   </TouchableOpacity>
                 ))}
                 {routeSearchResults.length === 0 ? (
-                  <Text style={styles.routeEmptyText}>??? ???? ?? ??? ???. ?? ??? ???? ??? ??? ???.</Text>
+                  <Text style={styles.routeEmptyText}>저장된 장소에서 검색 결과가 없어요. 먼저 캡처나 지도에서 장소를 등록해 주세요.</Text>
                 ) : null}
               </ScrollView>
             </Glass>
@@ -1679,16 +2755,22 @@ export default function App() {
 
           <Glass style={styles.routeResultSheet}>
             <View style={styles.routeResultTop}>
-              <Text style={styles.routeResultTitle}>??? ??</Text>
-              <TouchableOpacity style={styles.routeDoneButton} activeOpacity={0.82} onPress={completeSmartRoute}>
-                <Text style={styles.routeDoneText}>??</Text>
+              <Text style={styles.routeResultTitle}>스마트 동선</Text>
+              <TouchableOpacity style={styles.routeDoneButton} activeOpacity={0.82} onPress={finishSmartRouteSelection}>
+                <Text style={styles.routeDoneText}>완료</Text>
               </TouchableOpacity>
             </View>
             {routePlaces.length > 0 ? (
-              <TouchableOpacity style={styles.routeScheduleButton} activeOpacity={0.84} onPress={openSmartSchedulePage}>
-                <Ionicons name="calendar-outline" size={17} color="#FFFFFF" />
-                <Text style={styles.routeScheduleButtonText}>?? ??</Text>
-              </TouchableOpacity>
+              <>
+                <TouchableOpacity style={styles.routeScheduleButton} activeOpacity={0.84} onPress={saveCurrentRouteToCollection}>
+                  <Ionicons name="bookmark-outline" size={17} color="#FFFFFF" />
+                  <Text style={styles.routeScheduleButtonText}>컬렉션 저장</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.routeScheduleButton} activeOpacity={0.84} onPress={openSmartSchedulePage}>
+                  <Ionicons name="calendar-outline" size={17} color="#FFFFFF" />
+                  <Text style={styles.routeScheduleButtonText}>일정 생성</Text>
+                </TouchableOpacity>
+              </>
             ) : null}
           </Glass>
         </View>
@@ -1716,7 +2798,7 @@ export default function App() {
                   <Ionicons name="sparkles" size={15} color="#3182F6" />
                   <Text style={styles.badgeText}>Gemini AI 동선 플래너</Text>
                 </View>
-                <Text style={styles.cardTitle}>방문 날짜를 선택하면 기준점에서 가까운 순서와 이동 거리를 바탕으로 하루 일정을 만듭니다.</Text>
+                <Text style={styles.cardTitle}>방문 날짜를 선택하면 기준점에서 가까운 순서와 이동 거리를 바탕으로 하루 일정을 만들어줍니다.</Text>
                 <Text style={styles.fieldLabel}>방문 예정일</Text>
                 <TextInput
                   value={routeScheduleDate}
@@ -1750,6 +2832,10 @@ export default function App() {
                     {routeScheduleProvider === 'gemini' ? 'Gemini API로 생성된 일정표입니다.' : 'Gemini 연결이 없거나 실패해 앱 내부 로직으로 생성했습니다.'}
                   </Text>
                 ) : null}
+                <TouchableOpacity style={styles.secondaryButton} activeOpacity={0.82} onPress={saveCurrentRouteToCollection}>
+                  <Ionicons name="bookmark-outline" size={18} color="#3182F6" />
+                  <Text style={styles.secondaryButtonText}>동선 컬렉션에 저장</Text>
+                </TouchableOpacity>
               </Glass>
 
               {aiGeneratedItinerary?.length ? (
@@ -1802,23 +2888,39 @@ export default function App() {
           </SafeAreaView>
         </View>
       ) : null}
-
       {toast ? (
         <View style={styles.toast}>
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       ) : null}
 
-      {collectionPickerPlace ? (
+      {collectionPickerPlace || collectionPickerRoute ? (
         <View style={styles.collectionPickerOverlay}>
-          <TouchableOpacity style={styles.collectionPickerBackdrop} activeOpacity={1} onPress={() => setCollectionPickerPlace(null)} />
+          <TouchableOpacity
+            style={styles.collectionPickerBackdrop}
+            activeOpacity={1}
+            onPress={() => {
+              setCollectionPickerPlace(null);
+              setCollectionPickerRoute(null);
+            }}
+          />
           <Glass style={styles.collectionPickerSheet}>
             <View style={styles.collectionPickerTop}>
               <View>
                 <Text style={styles.collectionPickerTitle}>저장할 컬렉션</Text>
-                <Text style={styles.collectionPickerSub}>{collectionPickerPlace.name}을 담을 곳을 선택하세요.</Text>
+                <Text style={styles.collectionPickerSub}>
+                  {collectionPickerRoute
+                    ? `${collectionPickerRoute.title}을 담을 곳을 선택하세요.`
+                    : `${collectionPickerPlace.name}을 담을 곳을 선택하세요.`}
+                </Text>
               </View>
-              <TouchableOpacity activeOpacity={0.78} onPress={() => setCollectionPickerPlace(null)}>
+              <TouchableOpacity
+                activeOpacity={0.78}
+                onPress={() => {
+                  setCollectionPickerPlace(null);
+                  setCollectionPickerRoute(null);
+                }}
+              >
                 <Ionicons name="close" size={22} color="#111827" />
               </TouchableOpacity>
             </View>
@@ -1827,14 +2929,20 @@ export default function App() {
                 key={collection.id}
                 style={styles.collectionPickerRow}
                 activeOpacity={0.82}
-                onPress={() => addPlaceToCollection(collectionPickerPlace, collection.id)}
+                onPress={() =>
+                  collectionPickerRoute
+                    ? addRouteToCollection(collectionPickerRoute, collection.id)
+                    : addPlaceToCollection(collectionPickerPlace, collection.id)
+                }
               >
                 <View style={[styles.collectionPlaceIcon, { backgroundColor: collection.color }]}>
                   <Ionicons name={collection.icon || 'albums-outline'} size={16} color="#FFFFFF" />
                 </View>
                 <View style={styles.flex}>
                   <Text style={styles.routeTitle}>{collection.name}</Text>
-                  <Text style={styles.routeMeta}>{collection.placeIds.length}곳 저장됨</Text>
+                  <Text style={styles.routeMeta}>
+                    {collection.placeIds.length}곳 · 동선 {collection.routes?.length || 0}개
+                  </Text>
                 </View>
                 <Ionicons name="checkmark-circle-outline" size={20} color="#3182F6" />
               </TouchableOpacity>
@@ -1849,7 +2957,14 @@ export default function App() {
 
       {collectionCreatorOpen ? (
         <View style={styles.collectionCreatorOverlay}>
-          <TouchableOpacity style={styles.collectionPickerBackdrop} activeOpacity={1} onPress={() => setCollectionCreatorOpen(false)} />
+          <TouchableOpacity
+            style={styles.collectionPickerBackdrop}
+            activeOpacity={1}
+            onPress={() => {
+              setCollectionCreatorOpen(false);
+              setCollectionPickerRoute(null);
+            }}
+          />
           <Glass style={styles.collectionCreatorSheet}>
             <View style={styles.collectionPickerTop}>
               <View>
@@ -1858,7 +2973,13 @@ export default function App() {
                   이름, 아이콘, 색깔을 원하는 대로 정하세요.
                 </Text>
               </View>
-              <TouchableOpacity activeOpacity={0.78} onPress={() => setCollectionCreatorOpen(false)}>
+              <TouchableOpacity
+                activeOpacity={0.78}
+                onPress={() => {
+                  setCollectionCreatorOpen(false);
+                  setCollectionPickerRoute(null);
+                }}
+              >
                 <Ionicons name="close" size={22} color="#111827" />
               </TouchableOpacity>
             </View>
@@ -1912,7 +3033,14 @@ export default function App() {
             </View>
 
             <View style={styles.collectionCreatorActions}>
-              <TouchableOpacity style={styles.secondaryButton} activeOpacity={0.82} onPress={() => setCollectionCreatorOpen(false)}>
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                activeOpacity={0.82}
+                onPress={() => {
+                  setCollectionCreatorOpen(false);
+                  setCollectionPickerRoute(null);
+                }}
+              >
                 <Text style={styles.secondaryButtonText}>취소</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.collectionSaveButton} activeOpacity={0.82} onPress={saveCreatedCollection}>

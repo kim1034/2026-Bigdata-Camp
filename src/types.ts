@@ -12,11 +12,25 @@ export interface Place {
   address: string;
   latitude: number;
   longitude: number;
+  coordinates?: {
+    latitude: number;
+    longitude: number;
+  };
   hours: string;
   menu: PlaceMenu[];
   reviewSummary: string;
   screenshotText: string;
+  originalImage?: string;
+  googlePlaceId?: string;
+  provider?: string;
+  photoUrl?: string;
+  rating?: number | null;
+  userRatingsTotal?: number | null;
+  confidence?: number;
+  pinColor?: string;
+  collectionIds?: string[];
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ExtractionResult {

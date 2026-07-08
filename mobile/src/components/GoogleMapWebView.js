@@ -18,7 +18,8 @@ function safeJson(value) {
 function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
   const normalizedPlaces = places.map(normalizePlace).filter((place) => place.lat && place.lng);
   const activePlace = normalizePlace(selectedPlace || normalizedPlaces[0] || {});
-  const center = userLocation || activePlace || { lat: 37.5665, lng: 126.978 };
+  const hasSelectedPlace = selectedPlace && activePlace.lat && activePlace.lng;
+  const center = hasSelectedPlace ? activePlace : userLocation || activePlace || { lat: 37.5665, lng: 126.978 };
   const mapIdOption = mapId ? `mapId: ${JSON.stringify(mapId)},` : '';
 
   return `<!doctype html>
@@ -53,10 +54,10 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
         window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(payload));
       };
       window.gm_authFailure = function() {
-        window.report({ type: 'mapError', message: 'Google Maps API ???먮뒗 ?쒗븳 ?ㅼ젙???뺤씤??二쇱꽭??' });
+        window.report({ type: 'mapError', message: 'Google Maps API 키 또는 제한 설정을 확인해 주세요.' });
       };
       window.onerror = function(message) {
-        window.report({ type: 'mapError', message: String(message || '吏???ㅽ겕由쏀듃 ?ㅻ쪟') });
+        window.report({ type: 'mapError', message: String(message || '지도 스크립트 오류') });
       };
 
       function initMap() {
@@ -65,7 +66,7 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
         var userLocation = ${safeJson(userLocation || null)};
         var map = new google.maps.Map(document.getElementById('map'), {
           center: { lat: ${Number(center.lat)}, lng: ${Number(center.lng)} },
-          zoom: userLocation ? 15 : 13,
+          zoom: ${hasSelectedPlace ? 16 : 'userLocation ? 15 : 13'},
           ${mapIdOption}
           disableDefaultUI: true,
           gestureHandling: 'greedy',
@@ -138,7 +139,7 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
         function selectRouteCircle(x, y, radiusPx) {
           var projection = projectionHelper.getProjection && projectionHelper.getProjection();
           if (!projection) {
-            window.report({ type: 'routeCircleSelected', ids: [], message: '吏?꾨? 以鍮꾪븯??以묒엯?덈떎.' });
+            window.report({ type: 'routeCircleSelected', ids: [], message: '지도를 준비하는 중입니다.' });
             return;
           }
 
@@ -203,6 +204,36 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
           map.setZoom(nextZoom);
         }
 
+        function focusCoordinate(lat, lng, zoom) {
+          var nextLat = Number(lat);
+          var nextLng = Number(lng);
+          if (!isFinite(nextLat) || !isFinite(nextLng)) return;
+          map.panTo({ lat: nextLat, lng: nextLng });
+          map.setZoom(Math.max(Number(zoom) || 16, 15));
+        }
+
+        function fitCoordinates(points, padding) {
+          var nextBounds = new google.maps.LatLngBounds();
+          var validPoints = (Array.isArray(points) ? points : [])
+            .map(function(point) {
+              return { lat: Number(point.lat), lng: Number(point.lng) };
+            })
+            .filter(function(point) {
+              return isFinite(point.lat) && isFinite(point.lng);
+            });
+
+          if (validPoints.length === 0) return;
+          if (validPoints.length === 1) {
+            focusCoordinate(validPoints[0].lat, validPoints[0].lng, 16);
+            return;
+          }
+
+          validPoints.forEach(function(point) {
+            nextBounds.extend(point);
+          });
+          map.fitBounds(nextBounds, Number(padding) || 96);
+        }
+
         function clearRoutePolyline() {
           if (routeExplorePolyline) {
             routeExplorePolyline.setMap(null);
@@ -213,13 +244,13 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
         function renderRoutePolyline(encodedPolyline) {
           clearRoutePolyline();
           if (!encodedPolyline || !google.maps.geometry || !google.maps.geometry.encoding) {
-            window.report({ type: 'routeError', message: '寃쎈줈 ?좎쓣 洹몃┫ ???놁뒿?덈떎.' });
+            window.report({ type: 'routeError', message: '경로 선을 그릴 수 없습니다.' });
             return;
           }
 
           var path = google.maps.geometry.encoding.decodePath(encodedPolyline);
           if (!path || !path.length) {
-            window.report({ type: 'routeError', message: '寃쎈줈 醫뚰몴媛 鍮꾩뼱 ?덉뒿?덈떎.' });
+            window.report({ type: 'routeError', message: '경로 좌표가 비어 있습니다.' });
             return;
           }
 
@@ -340,7 +371,7 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
           new google.maps.Marker({
             position: userLocation,
             map: map,
-            title: '???꾩튂',
+            title: '내 위치',
             zIndex: 99,
             icon: markerIcon('#0A84FF', 9)
           });
@@ -363,7 +394,7 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
             provideRouteAlternatives: false
           }, function(result, status) {
             if (status !== 'OK' || !result || !result.routes || !result.routes[0]) {
-              window.report({ type: 'routeError', message: '?꾩옱 ?꾩튂 湲곗? 寃쎈줈瑜?李얠? 紐삵뻽?듬땲??', statusCode: status });
+              window.report({ type: 'routeError', message: '현재 위치 기준 경로를 찾지 못했습니다.', statusCode: status });
               return;
             }
             directionsRenderer.setDirections(result);
@@ -396,6 +427,8 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
             panByInstant(x, y);
           },
           zoomBy: zoomBy,
+          focusCoordinate: focusCoordinate,
+          fitCoordinates: fitCoordinates,
           renderRoutePolyline: renderRoutePolyline,
           clearRoutePolyline: clearRoutePolyline,
           selectRouteCircle: selectRouteCircle,
@@ -416,7 +449,7 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
         window.report({ type: 'mapReady' });
       }
     </script>
-    <script async defer src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&libraries=places,geometry&callback=initMap" onerror="window.report({ type: 'mapError', message: 'Google Maps JavaScript API瑜?遺덈윭?ㅼ? 紐삵뻽?듬땲??' })"></script>
+    <script async defer src="https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&libraries=places,geometry&callback=initMap" onerror="window.report({ type: 'mapError', message: 'Google Maps JavaScript API를 불러오지 못했습니다.' })"></script>
   </head>
   <body><div id="map"></div><div id="routeCircleOverlay"></div></body>
 </html>`;
@@ -457,6 +490,33 @@ export const GoogleMapWebView = forwardRef(function GoogleMapWebView(
       webViewRef.current?.injectJavaScript(`
         if (window.hotplaceMap && window.hotplaceMap.zoomBy) {
           window.hotplaceMap.zoomBy(${Number(delta) || 0});
+        }
+        true;
+      `);
+    },
+    focusPlace(place, zoom = 16) {
+      const normalizedPlace = normalizePlace(place || {});
+      const lat = Number(normalizedPlace.lat);
+      const lng = Number(normalizedPlace.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      webViewRef.current?.injectJavaScript(`
+        if (window.hotplaceMap && window.hotplaceMap.focusCoordinate) {
+          window.hotplaceMap.focusCoordinate(${lat}, ${lng}, ${Number(zoom) || 16});
+        }
+        true;
+      `);
+    },
+    fitCoordinates(coordinates, padding = 96) {
+      const points = (Array.isArray(coordinates) ? coordinates : [])
+        .map((point) => ({
+          lat: Number(point?.lat ?? point?.latitude),
+          lng: Number(point?.lng ?? point?.longitude),
+        }))
+        .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng));
+      if (points.length === 0) return;
+      webViewRef.current?.injectJavaScript(`
+        if (window.hotplaceMap && window.hotplaceMap.fitCoordinates) {
+          window.hotplaceMap.fitCoordinates(${JSON.stringify(points)}, ${Number(padding) || 96});
         }
         true;
       `);
@@ -557,4 +617,3 @@ export const GoogleMapWebView = forwardRef(function GoogleMapWebView(
     </View>
   );
 });
-

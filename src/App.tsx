@@ -15,7 +15,7 @@ import {
   loadPlacesFromFirestore,
   replacePlacesInFirestore,
   savePlaceToFirestore,
-} from "./services/firebaseDb";
+} from "./db/firebaseDb";
 
 export default function App() {
   // Load places from localStorage; starts empty on first run
