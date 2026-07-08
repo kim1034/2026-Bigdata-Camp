@@ -9,7 +9,7 @@ import {
   writeBatch,
   type Firestore,
 } from 'firebase/firestore';
-import type { Place, PlaceMenu } from '../types';
+import type { CategoryType, Place, PlaceMenu } from '../types';
 
 const FIREBASE_KEYS = [
   'apiKey',
@@ -77,11 +77,24 @@ function normalizeMenu(menu: unknown): PlaceMenu[] {
   }));
 }
 
+function normalizeCategory(category: unknown): CategoryType {
+  const raw = String(category || '').trim();
+  const text = raw.toLowerCase();
+  if (!text) return '관광지';
+  if (text.includes('카페') || text.includes('cafe') || text.includes('bakery')) return '카페';
+  if (text.includes('맛집') || text.includes('식당') || text.includes('음식') || text.includes('restaurant') || text.includes('food')) return '맛집';
+  if (text.includes('숙박') || text.includes('펜션') || text.includes('호텔') || text.includes('lodging') || text.includes('hotel')) return '숙박';
+  if (text.includes('관광') || text.includes('명소') || text.includes('체험') || text.includes('기타') || text.includes('tour') || text.includes('attraction')) return '관광지';
+  return ['카페', '맛집', '숙박', '관광지', '식당', '펜션/숙소', '관광지/기타'].includes(raw)
+    ? (raw as CategoryType)
+    : '관광지';
+}
+
 function normalizePlace(raw: any): Place {
   return {
     id: String(raw.id || `place-${Date.now()}`),
     name: String(raw.name || ''),
-    category: raw.category || '관광지/기타',
+    category: normalizeCategory(raw.category ?? raw.categoryLabel ?? raw.type ?? raw.placeType ?? raw.googlePrimaryType),
     address: String(raw.address || ''),
     latitude: Number(raw.latitude || 37.5446),
     longitude: Number(raw.longitude || 127.0559),
@@ -97,6 +110,7 @@ function normalizePlace(raw: any): Place {
     userRatingsTotal: raw.userRatingsTotal ?? null,
     confidence: Number(raw.confidence || 0.85),
     pinColor: raw.pinColor || '#FFFFFF',
+    pinIcon: raw.pinIcon || '',
     collectionIds: Array.isArray(raw.collectionIds) ? raw.collectionIds : [],
     createdAt: String(raw.createdAt || new Date().toISOString()),
     updatedAt: String(raw.updatedAt || new Date().toISOString()),
@@ -129,6 +143,7 @@ function serializePlace(place: Place) {
     userRatingsTotal: normalized.userRatingsTotal,
     confidence: normalized.confidence,
     pinColor: normalized.pinColor,
+    pinIcon: normalized.pinIcon,
     collectionIds: normalized.collectionIds,
     createdAt: normalized.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -142,6 +157,8 @@ function serializeCollection(item: any) {
     name: String(item.name || '나의 컬렉션'),
     color: String(item.color || '#3182F6'),
     icon: String(item.icon || 'albums-outline'),
+    visibility: item.visibility === 'friends' ? 'friends' : 'private',
+    isPublicToFriends: item.visibility === 'friends',
     placeIds: Array.isArray(item.placeIds) ? item.placeIds : [],
     places: Array.isArray(item.places) ? item.places.map(serializePlace) : [],
     routes: Array.isArray(item.routes) ? item.routes : [],
@@ -197,7 +214,13 @@ export async function loadPlacesFromFirestore(): Promise<Place[]> {
   const places = snapshot.docs.map((item) => normalizePlace({ id: item.id, ...item.data() }));
   const repairs = snapshot.docs
     .map((item, index) => ({ ref: item.ref, raw: item.data(), place: places[index] }))
-    .filter(({ raw }) => raw.schemaVersion !== 1 || !raw.address || !raw.coordinates || !Array.isArray(raw.menu))
+    .filter(({ raw, place }) =>
+      raw.schemaVersion !== 1 ||
+      raw.category !== place.category ||
+      !raw.address ||
+      !raw.coordinates ||
+      !Array.isArray(raw.menu)
+    )
     .map(({ ref, place }) => setDoc(ref, serializePlace(place), { merge: true }));
 
   if (repairs.length) {

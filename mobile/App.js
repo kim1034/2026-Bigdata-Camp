@@ -5,6 +5,7 @@ import {
   Alert,
   Image,
   PanResponder,
+  Platform,
   ScrollView,
   Share,
   StatusBar,
@@ -18,6 +19,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
 import { GoogleMapWebView } from './src/components/GoogleMapWebView';
 import { categories } from './src/data/places';
 import {
@@ -36,7 +38,8 @@ import {
 import { buildRoute } from './src/utils/inference';
 import { styles } from './src/styles';
 
-const ROUTE_SELECT_RADIUS = 92;
+const ROUTE_SELECT_RADIUS = 118;
+const ROUTE_BASE_RADIUS_METERS = 1500;
 const ROUTE_TAP_MOVE_THRESHOLD = 11;
 const ROUTE_PAN_SENSITIVITY = 1.65;
 const ROUTE_PAN_MIN_DELTA = 0.8;
@@ -47,6 +50,17 @@ const DETAIL_EXPAND_THRESHOLD = -360;
 const DETAIL_DRAG_LIMIT = -430;
 const DETAIL_FAST_FLICK_MIN_DRAG = -90;
 const DETAIL_FAST_FLICK_VELOCITY = -2.4;
+const EXPO_PUSH_PROJECT_ID = process.env.EXPO_PUBLIC_EAS_PROJECT_ID || '97ee4776-149b-40aa-b7b9-f96989472fb1';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const collectionIconOptions = [
   'albums-outline',
@@ -61,22 +75,15 @@ const collectionIconOptions = [
 
 const collectionColorOptions = ['#3182F6', '#00A86B', '#FF7A00', '#8B5CF6', '#FF3B30', '#111827'];
 
+const collectionVisibilityOptions = [
+  { key: 'private', label: '나만 보기', icon: 'lock-closed-outline', description: '내 계정에서만 볼 수 있어요.' },
+  { key: 'friends', label: '친구 공개', icon: 'people-outline', description: '친구에게 공유 가능한 컬렉션으로 표시돼요.' },
+];
+
 const routeExploreModes = [
   { key: 'WALK', label: '도보', icon: 'walk-outline' },
   { key: 'BICYCLE', label: '자전거', icon: 'bicycle-outline' },
   { key: 'TRANSIT', label: '대중교통', icon: 'bus-outline' },
-];
-
-const starterCollections = [
-  {
-    id: 'collection-weekend',
-    name: '이번 주말 코스',
-    color: '#3182F6',
-    icon: 'albums-outline',
-    placeIds: [],
-    routes: [],
-    createdAt: Date.now(),
-  },
 ];
 
 function Glass({ children, style }) {
@@ -95,11 +102,42 @@ function colorForCategory(category) {
   return categories.find((item) => item.label === category)?.color || '#3182F6';
 }
 
+function glyphForIcon(icon) {
+  const glyphs = {
+    'albums-outline': '▦',
+    'cafe-outline': '☕',
+    'restaurant-outline': '♨',
+    'bed-outline': '⌂',
+    'camera-outline': '◎',
+    'heart-outline': '♥',
+    'sparkles-outline': '✦',
+    'map-outline': '⌖',
+    'leaf-outline': '●',
+    'location-outline': '•',
+  };
+  return glyphs[icon] || '•';
+}
+
+function normalizeCategoryLabel(category) {
+  const raw = String(category || '').trim();
+  const text = raw.toLowerCase();
+  if (!text) return '관광지';
+  if (text.includes('카페') || text.includes('cafe') || text.includes('bakery')) return '카페';
+  if (text.includes('맛집') || text.includes('식당') || text.includes('음식') || text.includes('restaurant') || text.includes('food')) return '맛집';
+  if (text.includes('숙박') || text.includes('펜션') || text.includes('호텔') || text.includes('lodging') || text.includes('hotel')) return '숙박';
+  if (text.includes('관광') || text.includes('명소') || text.includes('체험') || text.includes('기타') || text.includes('tour') || text.includes('attraction')) return '관광지';
+  return categories.some((item) => item.label === raw && raw !== '전체') ? raw : '관광지';
+}
+
 function enrichPlace(place) {
+  const category = normalizeCategoryLabel(place.category ?? place.categoryLabel ?? place.type ?? place.placeType);
+  const markerIcon = place.pinIcon || iconForCategory(category);
   return {
     ...place,
-    color: place.pinColor || colorForCategory(place.category),
-    icon: iconForCategory(place.category),
+    category,
+    color: place.pinColor || colorForCategory(category),
+    icon: markerIcon,
+    glyph: glyphForIcon(markerIcon),
   };
 }
 
@@ -125,7 +163,7 @@ function compactRoutePlace(place) {
   return {
     id: place.id,
     name: place.name,
-    category: place.category,
+    category: normalizeCategoryLabel(place.category ?? place.categoryLabel ?? place.type ?? place.placeType),
     address: place.address,
     latitude: Number.isFinite(latitude) ? latitude : 0,
     longitude: Number.isFinite(longitude) ? longitude : 0,
@@ -145,6 +183,7 @@ function compactCollectionPlace(place) {
     rating: place.rating ?? null,
     userRatingsTotal: place.userRatingsTotal ?? null,
     pinColor: place.pinColor,
+    pinIcon: place.pinIcon,
     collectionIds: Array.isArray(place.collectionIds) ? place.collectionIds : [],
   };
 }
@@ -354,6 +393,16 @@ function buildNearestRoute(basePlace, sourcePlaces, limit = 6) {
   return ordered;
 }
 
+function routePlacesInsideBaseCircle(basePlace, sourcePlaces, radiusMeters = ROUTE_BASE_RADIUS_METERS) {
+  if (!placeCoordinate(basePlace)) return [];
+  const candidates = sourcePlaces
+    .filter((place) => place?.id !== basePlace?.id && placeCoordinate(place))
+    .map((place) => ({ ...place, distanceFromBase: calculateDistanceMeters(basePlace, place) }))
+    .filter((place) => place.distanceFromBase <= radiusMeters);
+
+  return buildNearestRoute(basePlace, candidates, candidates.length || 6);
+}
+
 function buildSmartItinerary(basePlace, orderedPlaces) {
   const currentTime = new Date();
   currentTime.setHours(10, 30, 0, 0);
@@ -479,6 +528,7 @@ export default function App() {
   const routePanDeltaRef = useRef({ x: 0, y: 0 });
   const routeZoomFrameRef = useRef(false);
   const routeZoomDeltaRef = useRef(0);
+  const pushTokenRegisteredForRef = useRef('');
   const [tab, setTab] = useState('map');
   const [authUser, setAuthUser] = useState(null);
   const [authStatus, setAuthStatus] = useState('idle');
@@ -491,6 +541,17 @@ export default function App() {
     age: '',
     gender: 'none',
   });
+  const [friendTarget, setFriendTarget] = useState('');
+  const [friendStatus, setFriendStatus] = useState('idle');
+  const [friendMessage, setFriendMessage] = useState('');
+  const [friendHub, setFriendHub] = useState({
+    friends: [],
+    incoming: [],
+    outgoing: [],
+    inbox: [],
+    publicCollections: [],
+  });
+  const [friendPublicCollectionOpen, setFriendPublicCollectionOpen] = useState(null);
   const [places, setPlaces] = useState([]);
   const [selectedPlace, setSelectedPlace] = useState(null);
   const [detailSheetVisible, setDetailSheetVisible] = useState(false);
@@ -540,8 +601,8 @@ export default function App() {
   const [aiSelectedRegion, setAiSelectedRegion] = useState('');
   const [aiSelectedDate, setAiSelectedDate] = useState(todayDateString());
   const [aiGeneratedItinerary, setAiGeneratedItinerary] = useState(null);
-  const [collections, setCollections] = useState(starterCollections);
-  const [selectedCollectionId, setSelectedCollectionId] = useState(starterCollections[0].id);
+  const [collections, setCollections] = useState([]);
+  const [selectedCollectionId, setSelectedCollectionId] = useState(null);
   const [collectionPickerPlace, setCollectionPickerPlace] = useState(null);
   const [collectionPickerRoute, setCollectionPickerRoute] = useState(null);
   const [collectionCreatorOpen, setCollectionCreatorOpen] = useState(false);
@@ -549,8 +610,31 @@ export default function App() {
     name: '',
     icon: collectionIconOptions[0],
     color: collectionColorOptions[0],
+    visibility: 'private',
   });
   const currentWorkspaceId = authUser?.workspaceId || defaultWorkspaceId();
+  const collectionById = useMemo(
+    () => new Map(collections.filter((item) => item?.id).map((item) => [item.id, item])),
+    [collections]
+  );
+
+  function pinVisualForCollectionIds(collectionIds) {
+    const firstCollection = (Array.isArray(collectionIds) ? collectionIds : [])
+      .map((id) => collectionById.get(id))
+      .find(Boolean);
+    return firstCollection
+      ? { pinColor: firstCollection.color || '#3182F6', pinIcon: firstCollection.icon || 'albums-outline' }
+      : { pinColor: '#FFFFFF', pinIcon: '' };
+  }
+
+  function applyCollectionPinVisual(place, collectionIds = place?.collectionIds) {
+    const visual = pinVisualForCollectionIds(collectionIds);
+    return {
+      ...place,
+      ...visual,
+      collectionIds: Array.isArray(collectionIds) ? collectionIds : [],
+    };
+  }
 
   const visiblePlaces = useMemo(() => {
     return places.filter((place) => {
@@ -561,8 +645,14 @@ export default function App() {
     });
   }, [places, category, query]);
 
-  const mapPlaces = useMemo(() => visiblePlaces.map(enrichPlace), [visiblePlaces]);
-  const mapSelectedPlace = useMemo(() => (selectedPlace ? enrichPlace(selectedPlace) : null), [selectedPlace]);
+  const mapPlaces = useMemo(
+    () => visiblePlaces.map((place) => enrichPlace(applyCollectionPinVisual(place))),
+    [visiblePlaces, collections]
+  );
+  const mapSelectedPlace = useMemo(
+    () => (selectedPlace ? enrichPlace(applyCollectionPinVisual(selectedPlace)) : null),
+    [selectedPlace, collections]
+  );
   const selectedCollection = useMemo(
     () => collections.find((item) => item.id === selectedCollectionId) || collections[0] || null,
     [collections, selectedCollectionId]
@@ -690,10 +780,16 @@ export default function App() {
         onPanResponderRelease: (event) => {
           const current = singleTouchRef.current;
           if (routeGestureModeRef.current === 'tap-candidate' && current && !current.moved) {
-            const x = current.startX;
-            const y = current.startY;
             setDetailSheetVisible(false);
-            mapRef.current?.selectRouteCircle(x, y, ROUTE_SELECT_RADIUS);
+            if (routeBasePlace) {
+              const nextRoute = routePlacesInsideBaseCircle(routeBasePlace, places);
+              setRoutePlaces(nextRoute);
+              focusRouteBaseCircle(routeBasePlace);
+              showToast(`기준 원 안의 저장 장소 ${nextRoute.length}곳을 선택했어요`);
+            } else {
+              setRouteSearchOpen(true);
+              showToast('먼저 기준 장소를 선택해 주세요');
+            }
           }
           routeGestureModeRef.current = 'idle';
           singleTouchRef.current = null;
@@ -715,7 +811,7 @@ export default function App() {
           routeZoomFrameRef.current = false;
         },
       }),
-    [routeSelectMode]
+    [places, routeBasePlace, routeSelectMode]
   );
   function resetDetailDragPosition() {
     detailDragExpandedRef.current = false;
@@ -819,8 +915,8 @@ export default function App() {
           setCollections(remoteCollections);
           setSelectedCollectionId(remoteCollections[0].id);
         } else {
-          setCollections(starterCollections);
-          setSelectedCollectionId(starterCollections[0].id);
+          setCollections([]);
+          setSelectedCollectionId(null);
         }
       } catch (error) {
         console.warn('Failed to hydrate workspace', error);
@@ -1006,6 +1102,46 @@ export default function App() {
     };
   }, [selectedPlace?.id, selectedPlace?.googlePlaceId, selectedPlace?.photoUrl]);
 
+  useEffect(() => {
+    if (authUser?.userId) {
+      loadFriendHub();
+    }
+  }, [authUser?.userId]);
+
+  useEffect(() => {
+    if (!authUser?.userId) return;
+    if (pushTokenRegisteredForRef.current === authUser.userId) return;
+
+    let cancelled = false;
+    async function syncPushToken() {
+      try {
+        const token = await getExpoPushTokenForDevice();
+        if (!token || cancelled) return;
+        await requestApiJson(
+          '/api/notifications/push-token',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: authUser.userId,
+              token,
+              platform: Platform.OS,
+            }),
+          },
+          '푸시 토큰 등록 실패:'
+        );
+        pushTokenRegisteredForRef.current = authUser.userId;
+      } catch (error) {
+        console.warn('Push token registration failed', error);
+      }
+    }
+
+    syncPushToken();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser?.userId]);
+
   function showToast(message) {
     setToast(message);
     setTimeout(() => setToast(''), 1700);
@@ -1023,6 +1159,42 @@ export default function App() {
       const preview = text.replace(/\s+/g, ' ').slice(0, 120);
       throw new Error(`${fallbackMessage} JSON 응답이 아닙니다. (${response.status}) ${preview}`);
     }
+  }
+
+  function apiBaseUrl() {
+    return process.env.EXPO_PUBLIC_API_BASE_URL?.replace(/\/$/, '') || '';
+  }
+
+  async function requestApiJson(path, options = {}, fallbackMessage = 'API 요청 실패:') {
+    const apiBase = apiBaseUrl();
+    if (!apiBase) {
+      throw new Error('EXPO_PUBLIC_API_BASE_URL이 필요합니다.');
+    }
+    const response = await fetch(`${apiBase}${path}`, options);
+    const payload = await readApiJson(response, fallbackMessage);
+    if (!response.ok) {
+      throw new Error(payload?.message || fallbackMessage);
+    }
+    return payload;
+  }
+
+  async function getExpoPushTokenForDevice() {
+    const currentPermission = await Notifications.getPermissionsAsync();
+    let finalStatus = currentPermission.status;
+    if (finalStatus !== 'granted') {
+      const requestedPermission = await Notifications.requestPermissionsAsync();
+      finalStatus = requestedPermission.status;
+    }
+
+    if (finalStatus !== 'granted') {
+      showToast('푸시 알림 권한이 꺼져 있어요');
+      return '';
+    }
+
+    const token = await Notifications.getExpoPushTokenAsync({
+      projectId: EXPO_PUSH_PROJECT_ID,
+    });
+    return token.data;
   }
 
   function updateAuthDraft(key, value) {
@@ -1105,10 +1277,192 @@ export default function App() {
 
   function signOutPasswordUser() {
     setAuthUser(null);
+    pushTokenRegisteredForRef.current = '';
     setAuthStatus('idle');
     setAuthMessage('로그아웃되었습니다.');
+    setFriendHub({ friends: [], incoming: [], outgoing: [], inbox: [], publicCollections: [] });
+    setFriendTarget('');
+    setFriendMessage('');
     setActiveWorkspaceId(defaultWorkspaceId());
     showToast('로그아웃 완료');
+  }
+
+  async function loadFriendHub() {
+    if (!authUser?.userId) return;
+    setFriendStatus('loading');
+    try {
+      const userId = encodeURIComponent(authUser.userId);
+      const [friendsPayload, requestsPayload, inboxPayload, publicCollectionsPayload] = await Promise.all([
+        requestApiJson(`/api/friends?userId=${userId}`, {}, '친구 목록 불러오기 실패:'),
+        requestApiJson(`/api/friends/requests?userId=${userId}`, {}, '친구 요청 불러오기 실패:'),
+        requestApiJson(`/api/share/inbox?userId=${userId}`, {}, '공유함 불러오기 실패:'),
+        requestApiJson(`/api/friends/public-collections?userId=${userId}`, {}, '친구 공개 컬렉션 불러오기 실패:'),
+      ]);
+      setFriendHub({
+        friends: friendsPayload.friends || [],
+        incoming: requestsPayload.incoming || [],
+        outgoing: requestsPayload.outgoing || [],
+        inbox: inboxPayload.items || [],
+        publicCollections: publicCollectionsPayload.collections || [],
+      });
+      setFriendMessage('');
+      setFriendStatus('ready');
+    } catch (error) {
+      console.warn('Friend hub failed', error);
+      setFriendStatus('error');
+      setFriendMessage(error instanceof Error ? error.message : '친구 정보를 불러오지 못했습니다.');
+    }
+  }
+
+  async function sendFriendRequestFromSettings() {
+    if (!authUser?.userId) {
+      showToast('로그인이 필요해요');
+      return;
+    }
+    const target = friendTarget.trim();
+    if (!target) {
+      setFriendMessage('친구 아이디 또는 친구 코드를 입력해 주세요.');
+      return;
+    }
+
+    setFriendStatus('loading');
+    try {
+      await requestApiJson(
+        '/api/friends/request',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fromUserId: authUser.userId, target }),
+        },
+        '친구 요청 실패:'
+      );
+      setFriendTarget('');
+      showToast('친구 요청을 보냈어요');
+      await loadFriendHub();
+    } catch (error) {
+      setFriendStatus('error');
+      setFriendMessage(error instanceof Error ? error.message : '친구 요청에 실패했습니다.');
+    }
+  }
+
+  async function respondFriendRequestFromSettings(requestId, action) {
+    if (!authUser?.userId) return;
+    setFriendStatus('loading');
+    try {
+      await requestApiJson(
+        `/api/friends/requests/${encodeURIComponent(requestId)}/${action}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: authUser.userId }),
+        },
+        action === 'accept' ? '친구 요청 수락 실패:' : '친구 요청 거절 실패:'
+      );
+      showToast(action === 'accept' ? '친구가 추가됐어요' : '친구 요청을 거절했어요');
+      await loadFriendHub();
+    } catch (error) {
+      setFriendStatus('error');
+      setFriendMessage(error instanceof Error ? error.message : '친구 요청 처리에 실패했습니다.');
+    }
+  }
+
+  async function removeFriendFromSettings(friendUserId) {
+    if (!authUser?.userId) return;
+    setFriendStatus('loading');
+    try {
+      await requestApiJson(
+        `/api/friends/${encodeURIComponent(friendUserId)}?userId=${encodeURIComponent(authUser.userId)}`,
+        { method: 'DELETE' },
+        '친구 삭제 실패:'
+      );
+      showToast('친구를 삭제했어요');
+      await loadFriendHub();
+    } catch (error) {
+      setFriendStatus('error');
+      setFriendMessage(error instanceof Error ? error.message : '친구 삭제에 실패했습니다.');
+    }
+  }
+
+  function currentItinerarySharePayload() {
+    if (!aiGeneratedItinerary?.length) return null;
+    const base = routeBasePlace || resolveRouteBasePlace();
+    const orderedPlaces = routePlaces.length ? routePlaces : base ? routePlacesInsideBaseCircle(base, places) : [];
+    const snapshot = buildItinerarySnapshot({
+      routeSnapshot: createCurrentRouteSnapshot(),
+      basePlace: base,
+      routePlaces: orderedPlaces,
+      visitDate: routeScheduleDate,
+      itinerary: aiGeneratedItinerary,
+      provider: routeScheduleProvider,
+      region: aiSelectedRegion || getRegionOfAddress(base?.address),
+    });
+    return {
+      type: 'itinerary',
+      targetId: snapshot.id,
+      title: snapshot.title,
+      payload: snapshot,
+    };
+  }
+
+  async function shareCurrentItineraryWithFriend(friend) {
+    if (!authUser?.userId) return;
+    const share = currentItinerarySharePayload();
+    if (!share) {
+      showToast('먼저 AI 일정표를 생성해 주세요');
+      return;
+    }
+
+    setFriendStatus('loading');
+    try {
+      await requestApiJson(
+        '/api/share',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ownerUserId: authUser.userId,
+            sharedWithUserIds: [friend.userId],
+            type: share.type,
+            targetId: share.targetId,
+            title: share.title,
+            payload: share.payload,
+            permission: 'view',
+          }),
+        },
+        '친구 공유 실패:'
+      );
+      showToast(`${friend.nickname || friend.userId}님에게 일정을 공유했어요`);
+      await loadFriendHub();
+    } catch (error) {
+      setFriendStatus('error');
+      setFriendMessage(error instanceof Error ? error.message : '친구 공유에 실패했습니다.');
+    }
+  }
+
+  function openFriendPublicCollection(collection) {
+    setFriendPublicCollectionOpen(collection);
+    setTab('collections');
+    showToast(`${collection.ownerNickname || '친구'}님의 컬렉션을 열었어요`);
+  }
+
+  function closeFriendPublicCollection() {
+    setFriendPublicCollectionOpen(null);
+    setTab('collections');
+  }
+
+  function openFriendPublicPlace(place) {
+    if (!place?.name) return;
+    const nextPlace = {
+      ...place,
+      id: place.id || `friend-place-${Date.now()}`,
+      pinColor: place.pinColor || colorForCategory(place.category),
+    };
+    setSelectedPlace(nextPlace);
+    setDetailSheetVisible(true);
+    setDetailExpanded(false);
+    setFriendPublicCollectionOpen(null);
+    setTab('map');
+    focusMapOnPlace(nextPlace);
   }
 
   async function saveUserPlaceReview() {
@@ -1144,6 +1498,15 @@ export default function App() {
     [220, 720].forEach((delay) => {
       setTimeout(() => {
         mapRef.current?.focusPlace(place, zoom);
+      }, delay);
+    });
+  }
+
+  function focusRouteBaseCircle(place) {
+    if (!placeCoordinate(place)) return;
+    [180, 620].forEach((delay) => {
+      setTimeout(() => {
+        mapRef.current?.showRouteBaseCircle(place, ROUTE_BASE_RADIUS_METERS);
       }, delay);
     });
   }
@@ -1239,6 +1602,7 @@ export default function App() {
     const nextPlace = {
       ...source,
       id: `place-${Date.now()}`,
+      category: normalizeCategoryLabel(source.category ?? source.categoryLabel ?? source.type ?? source.placeType),
       latitude: Number(source.latitude) || 37.5446,
       longitude: Number(source.longitude) || 127.0559,
       confidence: source.confidence || 0.9,
@@ -1298,6 +1662,8 @@ export default function App() {
       return;
     }
 
+    setRouteSelectMode(false);
+    setRouteSearchOpen(false);
     if (collections.length === 0) {
       setCollectionPickerRoute(routeSnapshot);
       createCollection();
@@ -1308,11 +1674,16 @@ export default function App() {
   }
 
   function addPlaceToCollection(place, collectionId) {
-    const nextColor = colorForCategory(place.category);
+    const nextCategory = normalizeCategoryLabel(place.category ?? place.categoryLabel ?? place.type ?? place.placeType);
     const targetCollection = collections.find((collection) => collection.id === collectionId);
+    const nextVisual = {
+      pinColor: targetCollection?.color || colorForCategory(nextCategory),
+      pinIcon: targetCollection?.icon || iconForCategory(nextCategory),
+    };
     const nextPlace = {
       ...place,
-      pinColor: nextColor,
+      category: nextCategory,
+      ...nextVisual,
       collectionIds: Array.from(new Set([...(place.collectionIds || []), collectionId])),
     };
     const placeSnapshot = compactCollectionPlace(nextPlace);
@@ -1336,7 +1707,7 @@ export default function App() {
         item.id === place.id
           ? {
               ...item,
-              pinColor: nextColor,
+              ...nextVisual,
               collectionIds: Array.from(new Set([...(item.collectionIds || []), collectionId])),
             }
           : item
@@ -1346,7 +1717,7 @@ export default function App() {
       current?.id === place.id
         ? {
             ...current,
-            pinColor: nextColor,
+            ...nextVisual,
             collectionIds: Array.from(new Set([...(current.collectionIds || []), collectionId])),
           }
         : current
@@ -1363,7 +1734,10 @@ export default function App() {
 
   function addRouteToCollection(routeSnapshot, collectionId) {
     const targetCollection = collections.find((collection) => collection.id === collectionId);
-    if (!targetCollection) return;
+    if (!targetCollection) {
+      showToast('컬렉션을 찾지 못했어요');
+      return;
+    }
 
     const nextRoutes = [
       routeSnapshot,
@@ -1372,30 +1746,24 @@ export default function App() {
     const nextCollection = {
       ...targetCollection,
       routes: nextRoutes,
+      updatedAt: new Date().toISOString(),
     };
 
-    setCollections((current) =>
-      current.map((collection) =>
-        collection.id === collectionId
-          ? {
-              ...collection,
-              routes: nextRoutes,
-            }
-          : collection
-      )
-    );
+    setCollections((current) => current.map((collection) => (collection.id === collectionId ? nextCollection : collection)));
     setSelectedCollectionId(collectionId);
     setCollectionPickerRoute(null);
+    setRouteSelectMode(false);
+    setRouteSearchOpen(false);
     saveRouteToFirestore(routeSnapshot).catch((error) => {
       console.warn('Failed to save route to Firestore', error);
     });
     saveCollectionToFirestore(nextCollection).catch(() => {});
-    showToast(`${targetCollection.name}에 동선을 저장했어요`);
+    showToast(`${nextCollection.name}에 동선을 저장했어요`);
   }
 
   function createCurrentRouteSnapshot() {
     const base = resolveRouteBasePlace();
-    const orderedPlaces = routePlaces.length ? routePlaces : base ? buildNearestRoute(base, places) : [];
+    const orderedPlaces = routePlaces.length ? routePlaces : base ? routePlacesInsideBaseCircle(base, places) : [];
     if (!base || orderedPlaces.length === 0) return null;
 
     return buildCollectionRouteSnapshot({
@@ -1464,6 +1832,7 @@ export default function App() {
       name: `새 컬렉션 ${nextIndex}`,
       icon: collectionIconOptions[collections.length % collectionIconOptions.length],
       color: collectionColorOptions[collections.length % collectionColorOptions.length],
+      visibility: 'private',
     });
     setCollectionCreatorOpen(true);
   }
@@ -1476,7 +1845,8 @@ export default function App() {
     const initialPlace = collectionPickerPlace
       ? {
           ...collectionPickerPlace,
-          pinColor: colorForCategory(collectionPickerPlace.category),
+          pinColor: collectionDraft.color,
+          pinIcon: collectionDraft.icon,
           collectionIds: Array.from(new Set([...(collectionPickerPlace.collectionIds || []), nextCollectionId])),
         }
       : null;
@@ -1485,6 +1855,7 @@ export default function App() {
       name: draftName,
       color: collectionDraft.color,
       icon: collectionDraft.icon,
+      visibility: collectionDraft.visibility || 'private',
       placeIds: initialPlace ? [initialPlace.id] : [],
       places: initialPlace ? [compactCollectionPlace(initialPlace)] : [],
       routes: initialRoutes,
@@ -1493,7 +1864,7 @@ export default function App() {
     setCollections((current) => [nextCollection, ...current]);
     setSelectedCollectionId(nextCollection.id);
     if (collectionPickerPlace) {
-      const nextColor = colorForCategory(collectionPickerPlace.category);
+      const nextVisual = { pinColor: nextCollection.color, pinIcon: nextCollection.icon };
       setCollections((current) =>
         current.map((collection) =>
           collection.id === nextCollection.id
@@ -1506,7 +1877,7 @@ export default function App() {
           place.id === collectionPickerPlace.id
             ? {
                 ...place,
-                pinColor: nextColor,
+                ...nextVisual,
                 collectionIds: Array.from(new Set([...(place.collectionIds || []), nextCollection.id])),
               }
             : place
@@ -1516,7 +1887,7 @@ export default function App() {
         current?.id === collectionPickerPlace.id
           ? {
               ...current,
-              pinColor: nextColor,
+              ...nextVisual,
               collectionIds: Array.from(new Set([...(current.collectionIds || []), nextCollection.id])),
             }
           : current
@@ -1535,6 +1906,23 @@ export default function App() {
     showToast(initialRoutes.length ? `${nextCollection.name}에 동선을 저장했어요` : `${nextCollection.name} 생성 완료`);
   }
 
+  function updateSelectedCollectionVisibility(visibility) {
+    if (!selectedCollection) return;
+    const nextCollection = {
+      ...selectedCollection,
+      visibility,
+    };
+    setCollections((current) =>
+      current.map((collection) => (collection.id === selectedCollection.id ? nextCollection : collection))
+    );
+    saveCollectionToFirestore(nextCollection)
+      .then(() => showToast(visibility === 'friends' ? '친구 공개로 변경했어요' : '나만 보기로 변경했어요'))
+      .catch((error) => {
+        console.warn('Failed to update collection visibility', error);
+        showToast('공개 범위 저장에 실패했어요');
+      });
+  }
+
   function deleteSelectedCollection() {
     if (!selectedCollection) {
       showToast('삭제할 컬렉션이 없어요');
@@ -1547,6 +1935,15 @@ export default function App() {
         style: 'destructive',
         onPress: () => {
           const removedId = selectedCollection.id;
+          const remainingCollections = collections.filter((collection) => collection.id !== removedId);
+          const visualForRemainingCollections = (collectionIds) => {
+            const firstCollection = (Array.isArray(collectionIds) ? collectionIds : [])
+              .map((id) => remainingCollections.find((collection) => collection.id === id))
+              .find(Boolean);
+            return firstCollection
+              ? { pinColor: firstCollection.color || '#3182F6', pinIcon: firstCollection.icon || 'albums-outline' }
+              : { pinColor: '#FFFFFF', pinIcon: '' };
+          };
           setCollections((current) => {
             const next = current.filter((collection) => collection.id !== removedId);
             setSelectedCollectionId(next[0]?.id || null);
@@ -1555,20 +1952,26 @@ export default function App() {
           setPlaces((current) =>
             current.map((place) => {
               const nextIds = (place.collectionIds || []).filter((id) => id !== removedId);
-              return {
+              const nextVisual = visualForRemainingCollections(nextIds);
+              const nextPlace = {
                 ...place,
                 collectionIds: nextIds,
-                pinColor: nextIds.length > 0 ? place.pinColor : '#FFFFFF',
+                ...nextVisual,
               };
+              if ((place.collectionIds || []).includes(removedId)) {
+                savePlaceToFirestore(nextPlace).catch(() => {});
+              }
+              return nextPlace;
             })
           );
           setSelectedPlace((current) => {
             if (!current) return current;
             const nextIds = (current.collectionIds || []).filter((id) => id !== removedId);
+            const nextVisual = visualForRemainingCollections(nextIds);
             return {
               ...current,
               collectionIds: nextIds,
-              pinColor: nextIds.length > 0 ? current.pinColor : '#FFFFFF',
+              ...nextVisual,
             };
           });
           deleteCollectionFromFirestore(removedId).catch(() => {});
@@ -1582,29 +1985,39 @@ export default function App() {
     setRouteSelectMode(true);
     setRouteSearchOpen(false);
     setDetailSheetVisible(false);
+    setDetailExpanded(false);
     setTab('map');
-    if (!routeBasePlace && selectedPlace) {
+    if (selectedPlace) {
       setRouteBasePlace(selectedPlace);
       setRouteBaseQuery(selectedPlace.name);
+      setRoutePlaces(routePlacesInsideBaseCircle(selectedPlace, places));
+      focusRouteBaseCircle(selectedPlace);
+    } else if (routeBasePlace) {
+      setRoutePlaces(routePlacesInsideBaseCircle(routeBasePlace, places));
+      focusRouteBaseCircle(routeBasePlace);
     }
-    showToast('기준 장소를 검색해서 스마트 동선을 만들어요');
+    showToast('기준 원 안의 저장 장소로 스마트 동선을 만들어요');
   }
 
   async function selectRouteBase(place) {
     setRouteBasePlace(place);
     setRouteBaseQuery(place.name);
     setRouteSearchOpen(false);
-    let nextRoute = buildNearestRoute(place, places);
+    const circlePlaces = routePlacesInsideBaseCircle(place, places);
+    let nextRoute = circlePlaces;
     try {
       const backendRoute = await requestSmartRouteFromBackend(place);
       if (backendRoute?.length) {
-        nextRoute = backendRoute;
+        const insideIds = new Set(circlePlaces.map((item) => item.id));
+        nextRoute = backendRoute.filter((item) => insideIds.has(item.id));
+        if (!nextRoute.length) nextRoute = circlePlaces;
       }
     } catch (error) {
       console.warn('Backend smart route failed; using local fallback', error);
     }
     setRoutePlaces(nextRoute);
-    showToast(`${place.name} 기준 동선 후보를 정리했어요`);
+    focusRouteBaseCircle(place);
+    showToast(`${place.name} 기준 원 안의 저장 장소 ${nextRoute.length}곳을 정리했어요`);
   }
 
   function resolveRouteBasePlace() {
@@ -1617,14 +2030,15 @@ export default function App() {
   async function requestSmartRouteFromBackend(base) {
     const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL;
     if (!apiBase) return null;
+    const circlePlaces = routePlacesInsideBaseCircle(base, places);
 
     const response = await fetch(`${apiBase.replace(/\/$/, '')}/api/routes/smart-plan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         basePlace: base,
-        places,
-        limit: 6,
+        places: circlePlaces,
+        limit: circlePlaces.length || 6,
       }),
     });
     const payload = await response.json();
@@ -1642,11 +2056,14 @@ export default function App() {
       return null;
     }
 
-    let nextRoute = buildNearestRoute(base, places);
+    const circlePlaces = routePlacesInsideBaseCircle(base, places);
+    let nextRoute = circlePlaces;
     try {
       const backendRoute = await requestSmartRouteFromBackend(base);
       if (backendRoute?.length) {
-        nextRoute = backendRoute;
+        const insideIds = new Set(circlePlaces.map((place) => place.id));
+        nextRoute = backendRoute.filter((place) => insideIds.has(place.id));
+        if (!nextRoute.length) nextRoute = circlePlaces;
       }
     } catch (error) {
       console.warn('Backend smart route failed; using local fallback', error);
@@ -1660,6 +2077,7 @@ export default function App() {
     setRouteBasePlace(base);
     setRouteBaseQuery(base.name);
     setRoutePlaces(nextRoute);
+    focusRouteBaseCircle(base);
     setAiSelectedRegion(getRegionOfAddress(base.address));
     saveRouteToFirestore(
       buildCollectionRouteSnapshot({
@@ -1672,7 +2090,7 @@ export default function App() {
     ).catch((error) => {
       console.warn('Failed to save smart route to Firestore', error);
     });
-    showToast(`${base.name} 기준으로 가까운 순서 동선을 만들었어요`);
+    showToast(`${base.name} 반경 ${formatMoveDistance(ROUTE_BASE_RADIUS_METERS)} 안의 저장 장소로 동선을 만들었어요`);
     return { base, route: nextRoute };
   }
 
@@ -1700,7 +2118,7 @@ export default function App() {
 
   async function generateSmartSchedule() {
     const base = resolveRouteBasePlace();
-    const orderedPlaces = routePlaces.length ? routePlaces : base ? buildNearestRoute(base, places) : [];
+    const orderedPlaces = routePlaces.length ? routePlaces : base ? routePlacesInsideBaseCircle(base, places) : [];
     if (!base || orderedPlaces.length === 0) {
       showToast('먼저 기준 장소로 동선을 만들어 주세요');
       return;
@@ -1801,7 +2219,7 @@ export default function App() {
       id: place.id || `google-${place.googlePlaceId || Date.now()}`,
       googlePlaceId: place.googlePlaceId,
       name: place.name,
-      category: categoryFromGoogleTypes(place.googleTypes),
+      category: normalizeCategoryLabel(categoryFromGoogleTypes(place.googleTypes)),
       address: place.address || 'Google 지도 등록 장소',
       latitude: Number(place.latitude) || 37.5446,
       longitude: Number(place.longitude) || 127.0559,
@@ -2070,10 +2488,6 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity style={styles.fab} activeOpacity={0.88} onPress={makeRoute}>
-            <Ionicons name="git-merge-outline" size={22} color="#FFFFFF" />
-          </TouchableOpacity>
-
           {selectedPlace && detailSheetVisible && !detailExpanded ? (
             <Animated.View style={[styles.detailMiniAnimated, { height: detailMiniHeight }]}>
               <Glass style={styles.detailSheet}>
@@ -2085,7 +2499,7 @@ export default function App() {
                     </View>
                     <View style={styles.flex}>
                       <Text style={styles.detailTitle} numberOfLines={1}>{selectedPlace.name}</Text>
-                      <Text style={styles.detailMeta} numberOfLines={1}>{selectedPlace.category}</Text>
+                      <Text style={styles.detailMeta} numberOfLines={1}>{normalizeCategoryLabel(selectedPlace.category)}</Text>
                     </View>
                     <Ionicons name="chevron-up" size={20} color="#8B95A1" />
                   </View>
@@ -2102,7 +2516,7 @@ export default function App() {
                 </TouchableOpacity>
                 <View style={styles.flex}>
                   <Text style={styles.detailFullTitle} numberOfLines={1}>{selectedPlace.name}</Text>
-                  <Text style={styles.detailMeta} numberOfLines={1}>{selectedPlace.category}</Text>
+                  <Text style={styles.detailMeta} numberOfLines={1}>{normalizeCategoryLabel(selectedPlace.category)}</Text>
                 </View>
               </View>
 
@@ -2114,8 +2528,8 @@ export default function App() {
                   <View style={styles.flex}>
                     <Text style={styles.detailTitle}>{selectedPlace.name}</Text>
                     <Text style={styles.detailMeta}>
-                      {selectedPlace.category} ? AI {Math.round((selectedPlace.confidence || 0.85) * 100)}%
-                      {routeInfo.status === 'ready' && routeInfo.durationText ? ` ? ${routeInfo.durationText}` : ''}
+                      {normalizeCategoryLabel(selectedPlace.category)}
+                      {routeInfo.status === 'ready' && routeInfo.durationText ? ` · ${routeInfo.durationText}` : ''}
                     </Text>
                   </View>
                 </View>
@@ -2130,6 +2544,14 @@ export default function App() {
                     <Text style={styles.infoText}>{normalizeMenu(selectedPlace.menu)}</Text>
                   </View>
                 </View>
+                <TouchableOpacity
+                  style={styles.routeExploreButton}
+                  activeOpacity={0.86}
+                  onPress={makeRoute}
+                >
+                  <Ionicons name="git-merge-outline" size={18} color="#FFFFFF" />
+                  <Text style={styles.routeExploreButtonText}>스마트 동선 생성</Text>
+                </TouchableOpacity>
                 <View style={styles.detailTabRow}>
                   {[
                     ['photos', '사진', 'images-outline'],
@@ -2337,12 +2759,12 @@ export default function App() {
               <Ionicons name="image-outline" size={15} color="#3182F6" />
               <Text style={styles.badgeText}>Gemini 이미지 분석</Text>
             </View>
-            <Text style={styles.cardTitle}>인스타/지도 캡처 한 장을 올리면 Gemini가 장소 정보를 추출합니다.</Text>
+            <Text style={styles.cardTitle}>장소 정보 추출!</Text>
 
             <TouchableOpacity style={styles.captureDrop} activeOpacity={0.86} onPress={pickScreenshot}>
               <Ionicons name="cloud-upload-outline" size={28} color="#3182F6" />
               <Text style={styles.captureDropTitle}>캡처 이미지 선택</Text>
-              <Text style={styles.captureDropSub}>앨범에서 스크린샷을 고르면 서버의 Gemini API로 분석합니다.</Text>
+              <Text style={styles.captureDropSub}>Upload</Text>
             </TouchableOpacity>
 
             {uploadedImage ? (
@@ -2394,9 +2816,6 @@ export default function App() {
               <Text style={styles.fieldLabel}>AI 리뷰 요약</Text>
               <TextInput multiline value={verification.reviewSummary} onChangeText={(value) => updateVerification('reviewSummary', value)} style={[styles.fieldInput, styles.fieldArea]} />
 
-              <Text style={styles.fieldLabel}>원본 캡처 내용</Text>
-              <TextInput multiline value={verification.screenshotText} onChangeText={(value) => updateVerification('screenshotText', value)} style={[styles.fieldInput, styles.fieldArea]} />
-
               <TouchableOpacity style={styles.primaryButton} onPress={saveExtracted}>
                 <Ionicons name="checkmark" size={18} color="#FFFFFF" />
                 <Text style={styles.primaryButtonText}>지도에 저장하기</Text>
@@ -2414,7 +2833,7 @@ export default function App() {
               <Ionicons name="calendar-outline" size={15} color="#3182F6" />
               <Text style={styles.badgeText}>오늘의 코스</Text>
             </View>
-            <Text style={styles.cardTitle}>동선 순서를 하루 일정표로 바꾸었습니다.</Text>
+            <Text style={styles.cardTitle}>하루 일정표</Text>
           </Glass>
 
           {(routePlaces.length ? routePlaces : places.slice(0, 4)).map((place, index) => (
@@ -2435,11 +2854,8 @@ export default function App() {
           <Glass style={styles.card}>
             <View style={styles.collectionHeader}>
               <View>
-                <Text style={styles.cardTitle}>내 핫플 묶음</Text>
+                <Text style={styles.cardTitle}>내 핫스팟</Text>
                 <Text style={styles.settingDesc}>지도에 저장한 장소를 여행 목적별로 모아둘 수 있어요.</Text>
-              </View>
-              <View style={styles.collectionCountBadge}>
-                <Text style={styles.collectionCountText}>{collections.length}</Text>
               </View>
             </View>
             <View style={styles.collectionActions}>
@@ -2478,10 +2894,40 @@ export default function App() {
 
           {selectedCollection ? (
             <Glass style={styles.card}>
-              <Text style={styles.resultConfidence}>{selectedCollection.name}</Text>
+              <View style={styles.collectionDetailTop}>
+                <Text style={styles.resultConfidence}>{selectedCollection.name}</Text>
+                <View style={styles.collectionVisibilityBadge}>
+                  <Ionicons
+                    name={selectedCollection.visibility === 'friends' ? 'people-outline' : 'lock-closed-outline'}
+                    size={13}
+                    color={selectedCollection.visibility === 'friends' ? '#3182F6' : '#6B7684'}
+                  />
+                  <Text style={styles.collectionVisibilityBadgeText}>
+                    {selectedCollection.visibility === 'friends' ? '친구 공개' : '나만 보기'}
+                  </Text>
+                </View>
+              </View>
               <Text style={styles.resultTitle}>
-                {selectedCollectionPlaces.length}곳 · 동선 {selectedCollectionRoutes.length}개
+               장소 {selectedCollectionPlaces.length}곳 · 동선 {selectedCollectionRoutes.length}개
               </Text>
+              <View style={styles.collectionVisibilityToggle}>
+                {collectionVisibilityOptions.map((option) => {
+                  const active = (selectedCollection.visibility || 'private') === option.key;
+                  return (
+                    <TouchableOpacity
+                      key={option.key}
+                      style={[styles.collectionVisibilityToggleButton, active && styles.collectionVisibilityToggleButtonOn]}
+                      activeOpacity={0.84}
+                      onPress={() => updateSelectedCollectionVisibility(option.key)}
+                    >
+                      <Ionicons name={option.icon} size={15} color={active ? '#FFFFFF' : '#6B7684'} />
+                      <Text style={[styles.collectionVisibilityToggleText, active && styles.collectionVisibilityToggleTextOn]}>
+                        {option.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
               {selectedCollectionPlaces.length === 0 && selectedCollectionRoutes.length === 0 ? (
                 <Text style={styles.detailDesc}>캡처 분석 후 지도에 등록할 때 컬렉션 저장을 선택하면 여기에 쌓입니다.</Text>
               ) : (
@@ -2510,7 +2956,7 @@ export default function App() {
                         <Text style={styles.routeTitle}>{place.name}</Text>
                         <Text style={styles.routeMeta}>{place.category} · {place.address}</Text>
                       </View>
-                      <Ionicons name="chevron-forward" size={18} color="#8B95A1" />
+                      <Ionicons name="chevron-forward" size={18} color="#8B95A1" style={styles.collectionRowChevron} />
                     </TouchableOpacity>
                   ))}
                   {selectedCollectionRoutes.map((route) => (
@@ -2528,11 +2974,11 @@ export default function App() {
                         <Text style={styles.routeMeta}>
                           {(route.places?.length || route.placeIds?.length || 0)}곳 · {route.visitDate || '날짜 미정'}
                         </Text>
-                        <Text style={styles.collectionRouteSteps} numberOfLines={1}>
+                        <Text style={styles.collectionRouteSteps} numberOfLines={2}>
                           {(route.places || []).map((place) => place.name).join(' → ')}
                         </Text>
                       </View>
-                      <Ionicons name="chevron-forward" size={18} color="#8B95A1" />
+                      <Ionicons name="chevron-forward" size={18} color="#8B95A1" style={styles.collectionRowChevron} />
                     </TouchableOpacity>
                   ))}
                 </>
@@ -2556,21 +3002,16 @@ export default function App() {
                 <Ionicons name="person-outline" size={24} color="#3182F6" />
               </View>
               <View style={styles.flex}>
-                <Text style={styles.cardTitle}>{authUser ? `${authUser.nickname}님` : '계정 로그인'}</Text>
+                <Text style={styles.cardTitle}>{authUser ? `${authUser.nickname}` : '계정 로그인'}</Text>
                 <Text style={styles.settingDesc}>
-                  {authUser ? `${authUser.userId} · ${authUser.age}세 · ${genderLabel(authUser.gender)}` : '아이디와 비밀번호로 내 장소와 컬렉션을 계정별로 저장합니다.'}
+                  {authUser ? `${authUser.age}세 · ${genderLabel(authUser.gender)}` : '아이디와 비밀번호로 내 장소와 컬렉션을 계정별로 저장합니다.'}
                 </Text>
               </View>
             </View>
 
             {authUser ? (
               <>
-                <View style={styles.authWorkspaceBox}>
-                  <Text style={styles.authLabel}>데이터 저장 공간</Text>
-                  <Text style={styles.authWorkspaceText} numberOfLines={1}>
-                    {currentWorkspaceId}
-                  </Text>
-                </View>
+                
                 <TouchableOpacity style={styles.secondaryButton} activeOpacity={0.82} onPress={signOutPasswordUser}>
                   <Ionicons name="log-out-outline" size={18} color="#3182F6" />
                   <Text style={styles.secondaryButtonText}>로그아웃</Text>
@@ -2679,7 +3120,165 @@ export default function App() {
             {authMessage ? <Text style={styles.authMessage}>{authMessage}</Text> : null}
           </Glass>
 
-          
+          {authUser ? (
+            <Glass style={styles.card}>
+              <View style={styles.friendHeader}>
+                <View>
+                  <Text style={styles.cardTitle}>친구</Text>
+                  <Text style={styles.settingDesc}>친구 코드로 추가하고 AI 일정표를 공유할 수 있어요.</Text>
+                </View>
+                <TouchableOpacity style={styles.friendRefreshButton} activeOpacity={0.82} onPress={loadFriendHub}>
+                  {friendStatus === 'loading' ? (
+                    <ActivityIndicator size="small" color="#3182F6" />
+                  ) : (
+                    <Ionicons name="refresh" size={18} color="#3182F6" />
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.friendCodeBox}>
+                <Text style={styles.authLabel}>내 친구 코드</Text>
+                <Text style={styles.friendCodeText}>{authUser.friendCode || '로그인 후 자동 생성'}</Text>
+              </View>
+
+              <View style={styles.friendAddRow}>
+                <TextInput
+                  value={friendTarget}
+                  onChangeText={setFriendTarget}
+                  placeholder="친구 아이디 또는 PIN-코드"
+                  placeholderTextColor="#8B95A1"
+                  autoCapitalize="characters"
+                  style={[styles.fieldInput, styles.friendAddInput]}
+                />
+                <TouchableOpacity style={styles.friendAddButton} activeOpacity={0.84} onPress={sendFriendRequestFromSettings}>
+                  <Ionicons name="person-add-outline" size={18} color="#FFFFFF" />
+                </TouchableOpacity>
+              </View>
+
+              {friendMessage ? <Text style={styles.authMessage}>{friendMessage}</Text> : null}
+
+              {friendHub.incoming.length ? (
+                <View style={styles.friendSection}>
+                  <Text style={styles.friendSectionTitle}>받은 요청</Text>
+                  {friendHub.incoming.map((request) => (
+                    <View key={request.id} style={styles.friendRow}>
+                      <View style={styles.friendAvatar}>
+                        <Ionicons name="person" size={15} color="#3182F6" />
+                      </View>
+                      <View style={styles.flex}>
+                        <Text style={styles.friendName}>{request.fromNickname || request.fromUserId}</Text>
+                        <Text style={styles.friendMeta}>{request.fromFriendCode || request.fromUserId}</Text>
+                      </View>
+                      <TouchableOpacity style={styles.friendMiniButton} activeOpacity={0.82} onPress={() => respondFriendRequestFromSettings(request.id, 'accept')}>
+                        <Text style={styles.friendMiniButtonText}>수락</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.friendMiniButton, styles.friendMiniButtonGhost]} activeOpacity={0.82} onPress={() => respondFriendRequestFromSettings(request.id, 'reject')}>
+                        <Text style={[styles.friendMiniButtonText, styles.friendMiniButtonGhostText]}>거절</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
+              {friendHub.outgoing.length ? (
+                <View style={styles.friendSection}>
+                  <Text style={styles.friendSectionTitle}>보낸 요청</Text>
+                  {friendHub.outgoing.map((request) => (
+                    <View key={request.id} style={styles.friendRow}>
+                      <View style={styles.friendAvatar}>
+                        <Ionicons name="time-outline" size={15} color="#8B95A1" />
+                      </View>
+                      <View style={styles.flex}>
+                        <Text style={styles.friendName}>{request.toNickname || request.toUserId}</Text>
+                        <Text style={styles.friendMeta}>수락 대기 중</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
+              <View style={styles.friendSection}>
+                <Text style={styles.friendSectionTitle}>친구 목록</Text>
+                {friendHub.friends.length ? (
+                  friendHub.friends.map((friend) => (
+                    <View key={friend.userId} style={styles.friendRow}>
+                      <View style={styles.friendAvatar}>
+                        <Ionicons name="people" size={15} color="#3182F6" />
+                      </View>
+                      <View style={styles.flex}>
+                        <Text style={styles.friendName}>{friend.nickname || friend.userId}</Text>
+                        <Text style={styles.friendMeta}>{friend.friendCode || friend.userId}</Text>
+                      </View>
+                      <TouchableOpacity style={styles.friendIconButton} activeOpacity={0.82} onPress={() => shareCurrentItineraryWithFriend(friend)}>
+                        <Ionicons name="share-social-outline" size={17} color="#3182F6" />
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.friendIconButton} activeOpacity={0.82} onPress={() => removeFriendFromSettings(friend.userId)}>
+                        <Ionicons name="trash-outline" size={17} color="#FF3B30" />
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.emptyInlineText}>아직 친구가 없어요. 친구 코드를 입력해 요청을 보내보세요.</Text>
+                )}
+              </View>
+
+              <View style={styles.friendSection}>
+                <Text style={styles.friendSectionTitle}>친구 공개 컬렉션</Text>
+                {friendHub.publicCollections.length ? (
+                  friendHub.publicCollections.map((collection) => {
+                    const previewPlaces = Array.isArray(collection.places) ? collection.places.slice(0, 3) : [];
+                    return (
+                      <View key={`${collection.ownerUserId}-${collection.id}`} style={styles.friendPublicCollectionRow}>
+                        <View style={[styles.collectionPlaceIcon, { backgroundColor: collection.color || '#3182F6' }]}>
+                          <Ionicons name={collection.icon || 'albums-outline'} size={16} color="#FFFFFF" />
+                        </View>
+                        <View style={styles.flex}>
+                          <Text style={styles.friendName}>{collection.name || '친구 컬렉션'}</Text>
+                          <Text style={styles.friendMeta}>
+                            {collection.ownerNickname || collection.ownerUserId} · 장소 {(collection.placeIds?.length || collection.places?.length || 0)}곳 · 동선 {collection.routes?.length || 0}개
+                          </Text>
+                          {previewPlaces.length ? (
+                            <Text style={styles.friendPublicCollectionPreview} numberOfLines={2}>
+                              {previewPlaces.map((place) => place.name).join(' · ')}
+                            </Text>
+                          ) : (
+                            <Text style={styles.friendPublicCollectionPreview}>공개된 장소 미리보기가 없어요.</Text>
+                          )}
+                        </View>
+                        <TouchableOpacity
+                          style={styles.friendIconButton}
+                          activeOpacity={0.82}
+                          onPress={() => openFriendPublicCollection(collection)}
+                        >
+                          <Ionicons name="eye-outline" size={18} color="#3182F6" />
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })
+                ) : (
+                  <Text style={styles.emptyInlineText}>친구가 공개한 컬렉션이 아직 없어요.</Text>
+                )}
+              </View>
+
+              <View style={styles.friendSection}>
+                <Text style={styles.friendSectionTitle}>공유받은 항목</Text>
+                {friendHub.inbox.length ? (
+                  friendHub.inbox.slice(0, 4).map((item) => (
+                    <View key={item.id} style={styles.friendInboxRow}>
+                      <Ionicons name={item.type === 'itinerary' ? 'calendar-outline' : 'bookmark-outline'} size={17} color="#FF7A00" />
+                      <View style={styles.flex}>
+                        <Text style={styles.friendName}>{item.title}</Text>
+                        <Text style={styles.friendMeta}>{item.ownerNickname || item.ownerUserId}님이 공유</Text>
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.emptyInlineText}>아직 공유받은 항목이 없어요.</Text>
+                )}
+              </View>
+            </Glass>
+          ) : null}
+
         </ScrollView>
       )}
 
@@ -2693,7 +3292,14 @@ export default function App() {
         ].map(([key, label, icon]) => {
           const active = tab === key;
           return (
-            <TouchableOpacity key={key} style={styles.tab} onPress={() => setTab(key)}>
+            <TouchableOpacity
+              key={key}
+              style={styles.tab}
+              onPress={() => {
+                setFriendPublicCollectionOpen(null);
+                setTab(key);
+              }}
+            >
               <Ionicons name={icon} size={21} color={active ? '#3182F6' : '#8B95A1'} />
               <Text style={[styles.tabText, active && styles.tabTextOn]}>{label}</Text>
             </TouchableOpacity>
@@ -2708,6 +3314,17 @@ export default function App() {
           <View style={styles.routeEdgeBottom} />
           <View style={styles.routeEdgeLeft} />
           <View style={styles.routeEdgeRight} />
+          {routeBasePlace ? (
+            <View pointerEvents="none" style={styles.routeCenterPinWrap}>
+              <View style={styles.routeCenterRadiusCircle} />
+              <View style={[styles.routeCenterPin, { backgroundColor: applyCollectionPinVisual(routeBasePlace).pinColor || colorForCategory(routeBasePlace.category) }]}>
+                <Ionicons name={applyCollectionPinVisual(routeBasePlace).pinIcon || iconForCategory(routeBasePlace.category)} size={22} color="#FFFFFF" />
+              </View>
+              <Text style={styles.routeCenterPinLabel} numberOfLines={1}>
+                {routeBasePlace.name}
+              </Text>
+            </View>
+          ) : null}
           <Glass style={styles.routeSelectGuide}>
             <View style={styles.routeGuideIcon}>
               <Ionicons name="search-outline" size={18} color="#FFFFFF" />
@@ -2755,7 +3372,12 @@ export default function App() {
 
           <Glass style={styles.routeResultSheet}>
             <View style={styles.routeResultTop}>
-              <Text style={styles.routeResultTitle}>스마트 동선</Text>
+              <View style={styles.flex}>
+                <Text style={styles.routeResultTitle}>스마트 동선</Text>
+                <Text style={styles.routeGuideSub}>
+                  기준 원 안의 저장 장소 {routePlaces.length}곳
+                </Text>
+              </View>
               <TouchableOpacity style={styles.routeDoneButton} activeOpacity={0.82} onPress={finishSmartRouteSelection}>
                 <Text style={styles.routeDoneText}>완료</Text>
               </TouchableOpacity>
@@ -2888,6 +3510,71 @@ export default function App() {
           </SafeAreaView>
         </View>
       ) : null}
+
+      {friendPublicCollectionOpen ? (
+        <View style={styles.friendCollectionPage}>
+          <SafeAreaView style={styles.routeScheduleSafe}>
+            <View style={styles.friendCollectionHeader}>
+              <TouchableOpacity activeOpacity={0.78} onPress={closeFriendPublicCollection} style={styles.detailBackButton}>
+                <Ionicons name="chevron-back" size={23} color="#111827" />
+              </TouchableOpacity>
+              <View style={styles.flex}>
+                <Text style={styles.friendCollectionOwner}>
+                  {friendPublicCollectionOpen.ownerNickname || friendPublicCollectionOpen.ownerUserId || '친구'}
+                </Text>
+                <Text style={styles.friendCollectionTitle}>{friendPublicCollectionOpen.name || '친구 공개 컬렉션'}</Text>
+              </View>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.friendCollectionContent}>
+              <Glass style={styles.card}>
+                <View style={styles.collectionDetailTop}>
+                  <View style={[styles.collectionPreviewIcon, { backgroundColor: friendPublicCollectionOpen.color || '#3182F6' }]}>
+                    <Ionicons name={friendPublicCollectionOpen.icon || 'albums-outline'} size={22} color="#FFFFFF" />
+                  </View>
+                  <View style={styles.flex}>
+                    <Text style={styles.cardTitle}>{friendPublicCollectionOpen.name || '친구 컬렉션'}</Text>
+                    <Text style={styles.settingDesc}>
+                      {(friendPublicCollectionOpen.places?.length || friendPublicCollectionOpen.placeIds?.length || 0)}곳 · 동선 {friendPublicCollectionOpen.routes?.length || 0}개
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.detailDesc}>친구가 공개한 컬렉션입니다. 저장된 장소들을 확인할 수 있어요.</Text>
+              </Glass>
+
+              {Array.isArray(friendPublicCollectionOpen.places) && friendPublicCollectionOpen.places.length ? (
+                friendPublicCollectionOpen.places.map((place, index) => (
+                  <TouchableOpacity
+                    key={place.id || `${friendPublicCollectionOpen.id}-place-${index}`}
+                    style={styles.friendCollectionPlaceCard}
+                    activeOpacity={0.84}
+                    onPress={() => openFriendPublicPlace(place)}
+                  >
+                    <View style={[styles.collectionPlaceIcon, { backgroundColor: colorForCategory(place.category) }]}>
+                      <Ionicons name={iconForCategory(place.category)} size={16} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.routeTitle}>{place.name || '장소'}</Text>
+                      <Text style={styles.routeMeta}>{place.category || '장소'} · {place.address || '주소 정보 없음'}</Text>
+                      {place.reviewSummary ? (
+                        <Text style={styles.friendCollectionPlaceSummary} numberOfLines={3}>
+                          {place.reviewSummary}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color="#8B95A1" style={styles.collectionRowChevron} />
+                  </TouchableOpacity>
+                ))
+              ) : (
+                <Glass style={styles.card}>
+                  <Text style={styles.cardTitle}>공개된 장소가 없어요</Text>
+                  <Text style={styles.detailDesc}>친구가 컬렉션에 장소를 추가하면 여기에 표시됩니다.</Text>
+                </Glass>
+              )}
+            </ScrollView>
+          </SafeAreaView>
+        </View>
+      ) : null}
       {toast ? (
         <View style={styles.toast}>
           <Text style={styles.toastText}>{toast}</Text>
@@ -2941,7 +3628,7 @@ export default function App() {
                 <View style={styles.flex}>
                   <Text style={styles.routeTitle}>{collection.name}</Text>
                   <Text style={styles.routeMeta}>
-                    {collection.placeIds.length}곳 · 동선 {collection.routes?.length || 0}개
+                    장소 {collection.placeIds.length}곳 · 동선 {collection.routes?.length || 0}개
                   </Text>
                 </View>
                 <Ionicons name="checkmark-circle-outline" size={20} color="#3182F6" />
@@ -3027,6 +3714,30 @@ export default function App() {
                     onPress={() => setCollectionDraft((current) => ({ ...current, color }))}
                   >
                     {active ? <Ionicons name="checkmark" size={17} color="#FFFFFF" /> : null}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.fieldLabel}>공개 범위</Text>
+            <View style={styles.collectionVisibilityRow}>
+              {collectionVisibilityOptions.map((option) => {
+                const active = collectionDraft.visibility === option.key;
+                return (
+                  <TouchableOpacity
+                    key={option.key}
+                    style={[styles.collectionVisibilityOption, active && styles.collectionVisibilityOptionOn]}
+                    activeOpacity={0.84}
+                    onPress={() => setCollectionDraft((current) => ({ ...current, visibility: option.key }))}
+                  >
+                    <Ionicons name={option.icon} size={18} color={active ? '#3182F6' : '#6B7684'} />
+                    <View style={styles.flex}>
+                      <Text style={[styles.collectionVisibilityTitle, active && styles.collectionVisibilityTitleOn]}>
+                        {option.label}
+                      </Text>
+                      <Text style={styles.collectionVisibilityDesc}>{option.description}</Text>
+                    </View>
+                    {active ? <Ionicons name="checkmark-circle" size={18} color="#3182F6" /> : null}
                   </TouchableOpacity>
                 );
               })}

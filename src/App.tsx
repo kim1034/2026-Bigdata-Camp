@@ -127,20 +127,7 @@ export default function App() {
         const remotePlaces = await loadPlacesFromFirestore();
         if (!isMounted) return;
 
-        if (remotePlaces.length > 0) {
-          setPlaces(remotePlaces);
-          return;
-        }
-
-        // Firestore is empty: seed it with locally saved places so existing data isn't lost
-        setPlaces((current) => {
-          if (current.length > 0) {
-            replacePlacesInFirestore(current).catch((error) => {
-              console.warn("Failed to seed Firestore with local places", error);
-            });
-          }
-          return current;
-        });
+        setPlaces(remotePlaces);
       } catch (error) {
         console.warn("Failed to load places from Firestore", error);
       }

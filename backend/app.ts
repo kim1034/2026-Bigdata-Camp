@@ -1,8 +1,10 @@
 import express from 'express';
 import { authRouter } from './routes/auth.routes';
 import { extractRouter } from './routes/extract.routes';
+import { friendsRouter } from './routes/friends.routes';
 import { healthRouter } from './routes/health.routes';
 import { itineraryRouter } from './routes/itinerary.routes';
+import { notificationsRouter } from './routes/notifications.routes';
 import { placesRouter } from './routes/places.routes';
 import { routingRouter } from './routes/routing.routes';
 import { transitRouter } from './routes/transit.routes';
@@ -22,6 +24,8 @@ export function createBackendApp() {
 
   app.use('/api', healthRouter);
   app.use('/api', authRouter);
+  app.use('/api', friendsRouter);
+  app.use('/api', notificationsRouter);
   app.use('/api', extractRouter);
   app.use('/api', itineraryRouter);
   app.use('/api', placesRouter);

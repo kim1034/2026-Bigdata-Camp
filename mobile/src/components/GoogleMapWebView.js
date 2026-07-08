@@ -120,6 +120,19 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
           };
         }
 
+        function markerLabel(place) {
+          var text = String(place.glyph || '').trim();
+          if (!text) return null;
+          var fillColor = String(place.color || '').toLowerCase();
+          var isWhitePin = fillColor === '#ffffff' || fillColor === 'white';
+          return {
+            text: text.slice(0, 2),
+            color: isWhitePin ? '#111827' : '#ffffff',
+            fontSize: '13px',
+            fontWeight: '900'
+          };
+        }
+
         function distanceMeters(a, b) {
           var earthRadius = 6371000;
           var dLat = (b.lat - a.lat) * Math.PI / 180;
@@ -181,6 +194,31 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
             center: center,
             radiusMeters: radiusMeters
           });
+        }
+
+        function showRouteBaseCircle(lat, lng, radiusMeters) {
+          var center = { lat: Number(lat), lng: Number(lng) };
+          if (!Number.isFinite(center.lat) || !Number.isFinite(center.lng)) return;
+          var radius = Math.max(120, Number(radiusMeters || 1500));
+
+          if (routeCircleOverlay) {
+            routeCircleOverlay.style.display = 'none';
+          }
+          if (routeCircle) routeCircle.setMap(null);
+          routeCircle = new google.maps.Circle({
+            map: map,
+            center: center,
+            radius: radius,
+            strokeColor: '#111827',
+            strokeOpacity: 0.72,
+            strokeWeight: 2,
+            fillColor: '#3182F6',
+            fillOpacity: 0.08,
+            clickable: false,
+            zIndex: 6
+          });
+          map.panTo(center);
+          map.setZoom(Math.max(map.getZoom() || 14, 15));
         }
 
         function panByInstant(x, y) {
@@ -348,7 +386,8 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
             map: map,
             title: place.name,
             zIndex: selectedPlace && selectedPlace.id === place.id ? 30 : 10,
-            icon: markerIcon(place.color, selectedPlace && selectedPlace.id === place.id ? 13 : 10)
+            icon: markerIcon(place.color, selectedPlace && selectedPlace.id === place.id ? 13 : 11),
+            label: markerLabel(place)
           });
           marker.addListener('click', function() {
             markerClickPending = true;
@@ -431,6 +470,7 @@ function buildMapHtml({ apiKey, mapId, places, selectedPlace, userLocation }) {
           fitCoordinates: fitCoordinates,
           renderRoutePolyline: renderRoutePolyline,
           clearRoutePolyline: clearRoutePolyline,
+          showRouteBaseCircle: showRouteBaseCircle,
           selectRouteCircle: selectRouteCircle,
           clearRouteCircle: function() {
             if (routeCircle) {
@@ -541,6 +581,18 @@ export const GoogleMapWebView = forwardRef(function GoogleMapWebView(
       webViewRef.current?.injectJavaScript(`
         if (window.hotplaceMap && window.hotplaceMap.selectRouteCircle) {
           window.hotplaceMap.selectRouteCircle(${Number(x) || 0}, ${Number(y) || 0}, ${Number(radiusPx) || 92});
+        }
+        true;
+      `);
+    },
+    showRouteBaseCircle(place, radiusMeters = 1500) {
+      const normalizedPlace = normalizePlace(place || {});
+      const lat = Number(normalizedPlace.lat);
+      const lng = Number(normalizedPlace.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      webViewRef.current?.injectJavaScript(`
+        if (window.hotplaceMap && window.hotplaceMap.showRouteBaseCircle) {
+          window.hotplaceMap.showRouteBaseCircle(${lat}, ${lng}, ${Number(radiusMeters) || 1500});
         }
         true;
       `);

@@ -20,6 +20,7 @@ const requiredKeys = [
 ];
 
 let activeWorkspaceId = '';
+let firestoreDb = null;
 
 export function setActiveWorkspaceId(workspaceId) {
   activeWorkspaceId = String(workspaceId || '').trim();
@@ -29,19 +30,23 @@ function getWorkspaceId() {
   return activeWorkspaceId || process.env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
 }
 
+function cleanEnv(value) {
+  return String(value || '').trim().replace(/^['"]|['"]$/g, '');
+}
+
 function getConfig() {
   const env = process.env;
-  const ready = requiredKeys.every((key) => Boolean(env[key]));
+  const ready = requiredKeys.every((key) => Boolean(cleanEnv(env[key])));
   if (!ready) return null;
 
   return {
-    apiKey: env.EXPO_PUBLIC_FIREBASE_API_KEY,
-    authDomain: env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
-    projectId: env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
-    storageBucket: env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
-    messagingSenderId: env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-    appId: env.EXPO_PUBLIC_FIREBASE_APP_ID,
-    measurementId: env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID,
+    apiKey: cleanEnv(env.EXPO_PUBLIC_FIREBASE_API_KEY),
+    authDomain: cleanEnv(env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN),
+    projectId: cleanEnv(env.EXPO_PUBLIC_FIREBASE_PROJECT_ID),
+    storageBucket: cleanEnv(env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET),
+    messagingSenderId: cleanEnv(env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID),
+    appId: cleanEnv(env.EXPO_PUBLIC_FIREBASE_APP_ID),
+    measurementId: cleanEnv(env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID),
   };
 }
 
@@ -57,12 +62,18 @@ function withTimeout(promise, label, timeoutMs = 12000) {
 function getDb() {
   const config = getConfig();
   if (!config) return null;
-  if (getApps().length) return getFirestore(getApp());
+  if (firestoreDb) return firestoreDb;
 
-  const app = initializeApp(config);
-  return initializeFirestore(app, {
-    experimentalForceLongPolling: true,
-  });
+  const app = getApps().length ? getApp() : initializeApp(config);
+  try {
+    firestoreDb = initializeFirestore(app, {
+      experimentalForceLongPolling: true,
+      useFetchStreams: false,
+    });
+  } catch (error) {
+    firestoreDb = getFirestore(app);
+  }
+  return firestoreDb;
 }
 
 function requireDb() {
@@ -117,14 +128,25 @@ function normalizeMenu(menu) {
   return [];
 }
 
+function normalizeCategory(category) {
+  const text = String(category || '').trim().toLowerCase();
+  if (!text) return '관광지';
+  if (text.includes('카페') || text.includes('cafe') || text.includes('bakery')) return '카페';
+  if (text.includes('맛집') || text.includes('식당') || text.includes('음식') || text.includes('restaurant') || text.includes('food')) return '맛집';
+  if (text.includes('숙박') || text.includes('펜션') || text.includes('호텔') || text.includes('lodging') || text.includes('hotel')) return '숙박';
+  if (text.includes('관광') || text.includes('명소') || text.includes('체험') || text.includes('기타') || text.includes('tour') || text.includes('attraction')) return '관광지';
+  return ['카페', '맛집', '숙박', '관광지'].includes(category) ? category : '관광지';
+}
+
 function normalizePlace(raw) {
   const latitude = Number(raw.latitude ?? raw.lat ?? raw.coordinates?.latitude ?? 37.5446);
   const longitude = Number(raw.longitude ?? raw.lng ?? raw.coordinates?.longitude ?? 127.0559);
+  const category = normalizeCategory(raw.category ?? raw.categoryLabel ?? raw.type ?? raw.placeType ?? raw.googlePrimaryType);
 
   return {
     id: String(raw.id || `place-${Date.now()}`),
     name: String(raw.name || ''),
-    category: String(raw.category || '카페'),
+    category,
     address: String(raw.address || ''),
     latitude: Number.isFinite(latitude) ? latitude : 37.5446,
     longitude: Number.isFinite(longitude) ? longitude : 127.0559,
@@ -140,6 +162,7 @@ function normalizePlace(raw) {
     userRatingsTotal: raw.userRatingsTotal ?? null,
     confidence: Number(raw.confidence || 0.85),
     pinColor: raw.pinColor || '#FFFFFF',
+    pinIcon: raw.pinIcon || '',
     collectionIds: Array.isArray(raw.collectionIds) ? raw.collectionIds : [],
     createdAt: String(raw.createdAt || new Date().toISOString()),
     updatedAt: String(raw.updatedAt || new Date().toISOString()),
@@ -175,6 +198,7 @@ function serializePlace(place) {
     userRatingsTotal: normalized.userRatingsTotal,
     confidence: normalized.confidence,
     pinColor: normalized.pinColor,
+    pinIcon: normalized.pinIcon,
     collectionIds: normalized.collectionIds,
     createdAt: normalized.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -188,6 +212,8 @@ function serializeCollection(item) {
     name: String(item.name || '나의 컬렉션'),
     color: String(item.color || '#3182F6'),
     icon: String(item.icon || 'albums-outline'),
+    visibility: item.visibility === 'friends' ? 'friends' : 'private',
+    isPublicToFriends: item.visibility === 'friends',
     placeIds: Array.isArray(item.placeIds) ? item.placeIds : [],
     places: Array.isArray(item.places) ? item.places.map(serializePlace) : [],
     routes: Array.isArray(item.routes) ? item.routes : [],
@@ -202,6 +228,7 @@ function normalizeCollection(raw) {
     name: String(raw.name || '나의 컬렉션'),
     color: String(raw.color || '#3182F6'),
     icon: String(raw.icon || 'albums-outline'),
+    visibility: raw.visibility === 'friends' || raw.isPublicToFriends ? 'friends' : 'private',
     placeIds: Array.isArray(raw.placeIds) ? raw.placeIds : [],
     places: Array.isArray(raw.places) ? raw.places.map(normalizePlace) : [],
     routes: Array.isArray(raw.routes) ? raw.routes : [],
@@ -312,7 +339,13 @@ export async function loadPlacesFromFirestore() {
   const places = snapshot.docs.map((item) => normalizePlace({ id: item.id, ...item.data() }));
   const repairs = snapshot.docs
     .map((item, index) => ({ ref: item.ref, raw: item.data(), place: places[index] }))
-    .filter(({ raw }) => raw.schemaVersion !== 1 || !raw.address || !raw.coordinates || !Array.isArray(raw.menu))
+    .filter(({ raw, place }) =>
+      raw.schemaVersion !== 1 ||
+      raw.category !== place.category ||
+      !raw.address ||
+      !raw.coordinates ||
+      !Array.isArray(raw.menu)
+    )
     .map(({ ref, place }) => setDoc(ref, serializePlace(place), { merge: true }));
 
   if (repairs.length) {

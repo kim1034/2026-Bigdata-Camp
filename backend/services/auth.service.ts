@@ -1,4 +1,4 @@
-import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { getBackendFirestore } from '../db/firebase';
@@ -11,6 +11,7 @@ export type PasswordAuthUser = {
   nickname: string;
   age: number;
   gender: string;
+  friendCode: string;
   workspaceId: string;
   createdAt?: string;
 };
@@ -30,6 +31,10 @@ function safeWorkspaceId(userId: string) {
   return `user_${userId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 }
 
+function friendCodeForUser(userId: string) {
+  return `PIN-${createHash('sha1').update(userId).digest('hex').slice(0, 6).toUpperCase()}`;
+}
+
 function publicUser(user: StoredUser): PasswordAuthUser {
   return {
     uid: user.uid,
@@ -37,6 +42,7 @@ function publicUser(user: StoredUser): PasswordAuthUser {
     nickname: user.nickname,
     age: user.age,
     gender: user.gender,
+    friendCode: user.friendCode || friendCodeForUser(user.userId),
     workspaceId: user.workspaceId,
     createdAt: user.createdAt,
   };
@@ -116,6 +122,7 @@ export async function registerPasswordUser(input: {
     nickname,
     age,
     gender,
+    friendCode: friendCodeForUser(userId),
     workspaceId: safeWorkspaceId(userId),
     passwordHash: hash,
     passwordSalt: salt,
@@ -142,6 +149,7 @@ export async function loginPasswordUser(input: { userId: string; password: strin
   }
 
   const user = snapshot.data() as StoredUser;
+  const nextFriendCode = user.friendCode || friendCodeForUser(userId);
   const matched = await verifyPassword(password, user.passwordHash, user.passwordSalt);
   if (!matched) {
     throw new Error('아이디 또는 비밀번호가 올바르지 않습니다.');
@@ -151,6 +159,7 @@ export async function loginPasswordUser(input: { userId: string; password: strin
     userRef,
     {
       lastLoginAt: new Date().toISOString(),
+      friendCode: nextFriendCode,
       updatedAt: new Date().toISOString(),
     },
     { merge: true }

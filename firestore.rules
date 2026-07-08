@@ -6,6 +6,22 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    match /users/{userId}/friends/{friendUserId} {
+      allow read, write: if true;
+    }
+
+    match /users/{userId}/shareInbox/{shareId} {
+      allow read, write: if true;
+    }
+
+    match /friendRequests/{requestId} {
+      allow read, write: if true;
+    }
+
+    match /sharedItems/{shareId} {
+      allow read, write: if true;
+    }
+
     match /workspaces/{workspaceId}/places/{placeId} {
       allow read, write: if true;
     }

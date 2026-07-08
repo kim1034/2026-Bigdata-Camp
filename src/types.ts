@@ -1,4 +1,4 @@
-export type CategoryType = '카페' | '식당' | '펜션/숙소' | '관광지/기타';
+export type CategoryType = '카페' | '맛집' | '숙박' | '관광지' | '식당' | '펜션/숙소' | '관광지/기타';
 
 export interface PlaceMenu {
   name: string;
@@ -28,6 +28,7 @@ export interface Place {
   userRatingsTotal?: number | null;
   confidence?: number;
   pinColor?: string;
+  pinIcon?: string;
   collectionIds?: string[];
   createdAt: string;
   updatedAt?: string;
