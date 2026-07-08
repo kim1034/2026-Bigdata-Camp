@@ -1,6 +1,7 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
 import {
   collection,
+  deleteDoc,
   doc,
   getDocs,
   getFirestore,
@@ -46,6 +47,11 @@ function placesCollection(db) {
   return collection(db, 'workspaces', workspaceId, 'places');
 }
 
+function collectionsCollection(db) {
+  const workspaceId = process.env.EXPO_PUBLIC_FIREBASE_WORKSPACE_ID || 'default';
+  return collection(db, 'workspaces', workspaceId, 'collections');
+}
+
 function serializePlace(place) {
   const originalImage =
     place.originalImage && place.originalImage.length < 650000 ? place.originalImage : undefined;
@@ -72,6 +78,27 @@ function normalizePlace(raw) {
     originalImage: raw.originalImage,
     confidence: Number(raw.confidence || 0.85),
     createdAt: String(raw.createdAt || new Date().toISOString()),
+    pinColor: raw.pinColor,
+    collectionIds: Array.isArray(raw.collectionIds) ? raw.collectionIds : [],
+  };
+}
+
+function serializeCollection(item) {
+  return {
+    ...item,
+    placeIds: Array.isArray(item.placeIds) ? item.placeIds : [],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeCollection(raw) {
+  return {
+    id: String(raw.id || `collection-${Date.now()}`),
+    name: String(raw.name || '나의 컬렉션'),
+    color: String(raw.color || '#3182F6'),
+    icon: String(raw.icon || 'albums-outline'),
+    placeIds: Array.isArray(raw.placeIds) ? raw.placeIds : [],
+    createdAt: raw.createdAt || Date.now(),
   };
 }
 
@@ -90,4 +117,23 @@ export async function savePlaceToFirestore(place) {
   const db = getDb();
   if (!db) return;
   await setDoc(doc(placesCollection(db), place.id), serializePlace(place), { merge: true });
+}
+
+export async function loadCollectionsFromFirestore() {
+  const db = getDb();
+  if (!db) return [];
+  const snapshot = await getDocs(query(collectionsCollection(db), orderBy('createdAt', 'desc')));
+  return snapshot.docs.map((item) => normalizeCollection({ id: item.id, ...item.data() }));
+}
+
+export async function saveCollectionToFirestore(item) {
+  const db = getDb();
+  if (!db) return;
+  await setDoc(doc(collectionsCollection(db), item.id), serializeCollection(item), { merge: true });
+}
+
+export async function deleteCollectionFromFirestore(collectionId) {
+  const db = getDb();
+  if (!db) return;
+  await deleteDoc(doc(collectionsCollection(db), collectionId));
 }
