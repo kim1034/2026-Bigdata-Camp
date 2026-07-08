@@ -16,7 +16,6 @@ export interface Place {
   menu: PlaceMenu[];
   reviewSummary: string;
   screenshotText: string;
-  originalImage?: string; // base64 string
   createdAt: string;
 }
 

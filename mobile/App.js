@@ -6,7 +6,6 @@ import {
   PanResponder,
   SafeAreaView,
   ScrollView,
-  Share,
   StatusBar,
   Text,
   TextInput,
@@ -18,7 +17,7 @@ import { BlurView } from 'expo-blur';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { GoogleMapWebView } from './src/components/GoogleMapWebView';
-import { categories, demoScreenshots, demoTexts, initialPlaces } from './src/data/places';
+import { categories } from './src/data/places';
 import {
   deleteCollectionFromFirestore,
   isFirebaseDbConfigured,
@@ -27,7 +26,7 @@ import {
   saveCollectionToFirestore,
   savePlaceToFirestore,
 } from './src/services/firebaseDb';
-import { buildRoute, inferPlaceFromImagePayload, inferPlaceFromText } from './src/utils/inference';
+import { buildRoute } from './src/utils/inference';
 import { styles } from './src/styles';
 
 const ROUTE_SELECT_RADIUS = 92;
@@ -99,7 +98,7 @@ function normalizeMenu(menu) {
 }
 
 function normalizeExtractedPlace(payload, fallbackImage) {
-  const source = payload?.place || payload || inferPlaceFromImagePayload(fallbackImage);
+  const source = payload?.place || payload || {};
   return {
     ...source,
     menu: normalizeMenu(source.menu),
@@ -150,17 +149,10 @@ function calculateDistanceMeters(from, to) {
   return 2 * earthRadius * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
-function getRegionOfAddress(address) {
-  const text = String(address || '').trim();
-  if (!text) return '기타 지역';
-  const parts = text.split(/\s+/).filter(Boolean);
-  return (
-    parts.find((part) => part.endsWith('구')) ||
-    parts.find((part) => part.endsWith('동') || part.endsWith('읍') || part.endsWith('면')) ||
-    parts.find((part) => part.endsWith('시') || part.endsWith('군')) ||
-    parts[0] ||
-    '기타 지역'
-  );
+function formatMoveDistance(meters) {
+  if (!Number.isFinite(meters)) return '';
+  if (meters >= 1000) return `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)}km`;
+  return `${Math.round(meters)}m`;
 }
 
 function todayDateString(offset = 0) {
@@ -177,39 +169,37 @@ function weekendDateString() {
   return date.toISOString().split('T')[0];
 }
 
-function firstMenuName(menu) {
-  if (Array.isArray(menu) && menu[0]) return menu[0].name || String(menu[0]);
-  return String(menu || '').split(',')[0].trim() || '대표 메뉴';
+function timeText(date) {
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
 function addMinutes(date, minutes) {
   date.setMinutes(date.getMinutes() + minutes);
 }
 
-function timeText(date) {
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+function firstMenuName(menu) {
+  if (Array.isArray(menu) && menu[0]) return menu[0].name || String(menu[0]);
+  return String(menu || '').split(',')[0].trim() || '대표 메뉴';
 }
 
-function routeModeLabel(mode) {
-  return routeExploreModes.find((item) => item.key === mode)?.label || '경로';
-}
-
-function routeDisplayText(route) {
-  if (!route) return '';
-  return [route.durationText, route.distanceText].filter(Boolean).join(' · ');
-}
-
-function formatMoveDistance(meters) {
-  if (!Number.isFinite(meters)) return '';
-  if (meters >= 1000) return `${(meters / 1000).toFixed(meters >= 10000 ? 0 : 1)}km`;
-  return `${Math.round(meters)}m`;
+function getRegionOfAddress(address) {
+  const text = String(address || '').trim();
+  if (!text) return '기타 지역';
+  const parts = text.split(/\s+/).filter(Boolean);
+  return (
+    parts.find((part) => part.endsWith('구')) ||
+    parts.find((part) => part.endsWith('동') || part.endsWith('읍') || part.endsWith('면')) ||
+    parts.find((part) => part.endsWith('시') || part.endsWith('군')) ||
+    parts[0] ||
+    '기타 지역'
+  );
 }
 
 function categoryKind(category) {
   const text = String(category || '');
   if (text.includes('카페')) return 'cafe';
-  if (text.includes('맛') || text.includes('식당')) return 'food';
-  if (text.includes('숙') || text.includes('펜션')) return 'stay';
+  if (text.includes('맛') || text.includes('식당') || text.includes('앸')) return 'food';
+  if (text.includes('숙') || text.includes('펜션') || text.includes('숈')) return 'stay';
   if (text.includes('관광') || text.includes('공원')) return 'attraction';
   return 'place';
 }
@@ -250,16 +240,11 @@ function itineraryActivityForPlace(place) {
 
 function buildNearestRoute(basePlace, sourcePlaces, limit = 6) {
   if (!placeCoordinate(basePlace)) return [];
-
   const remaining = sourcePlaces
     .filter((place) => place?.id !== basePlace?.id && placeCoordinate(place))
-    .map((place) => ({
-      ...place,
-      distanceFromBase: calculateDistanceMeters(basePlace, place),
-    }))
+    .map((place) => ({ ...place, distanceFromBase: calculateDistanceMeters(basePlace, place) }))
     .sort((a, b) => a.distanceFromBase - b.distanceFromBase)
     .slice(0, limit);
-
   const ordered = [];
   let current = basePlace;
 
@@ -300,7 +285,7 @@ function buildSmartItinerary(basePlace, orderedPlaces) {
         type: isWalk ? 'walk' : 'car',
         duration: minutes,
         distance,
-        text: `${isWalk ? '🚶 도보' : '🚗 차량'} 이동 ${minutes}분 (${formatMoveDistance(distance)})`,
+        text: `${isWalk ? '도보' : '차량'} 이동 ${minutes}분 (${formatMoveDistance(distance)})`,
       };
       addMinutes(currentTime, preset.durationMinutes + minutes);
     }
@@ -374,18 +359,17 @@ export default function App() {
   const routeZoomFrameRef = useRef(false);
   const routeZoomDeltaRef = useRef(0);
   const [tab, setTab] = useState('map');
-  const [places, setPlaces] = useState(initialPlaces);
-  const [selectedPlace, setSelectedPlace] = useState(initialPlaces[0]);
-  const [detailSheetVisible, setDetailSheetVisible] = useState(true);
+  const [places, setPlaces] = useState([]);
+  const [selectedPlace, setSelectedPlace] = useState(null);
+  const [detailSheetVisible, setDetailSheetVisible] = useState(false);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('전체');
-  const [extractText, setExtractText] = useState(demoTexts[0]);
   const [extracting, setExtracting] = useState(false);
   const [extractStep, setExtractStep] = useState('');
   const [uploadedImage, setUploadedImage] = useState(null);
   const [extractResult, setExtractResult] = useState(null);
   const [verification, setVerification] = useState(null);
-  const [routePlaces, setRoutePlaces] = useState(buildRoute(initialPlaces.slice(0, 4)));
+  const [routePlaces, setRoutePlaces] = useState([]);
   const [toast, setToast] = useState('');
   const [userLocation, setUserLocation] = useState(null);
   const [mapStatus, setMapStatus] = useState({ status: 'idle', message: '' });
@@ -410,6 +394,9 @@ export default function App() {
   const [routeScheduleDate, setRouteScheduleDate] = useState(weekendDateString());
   const [routeScheduleLoading, setRouteScheduleLoading] = useState(false);
   const [routeScheduleProvider, setRouteScheduleProvider] = useState('');
+  const [aiSelectedRegion, setAiSelectedRegion] = useState('');
+  const [aiSelectedDate, setAiSelectedDate] = useState(todayDateString());
+  const [aiGeneratedItinerary, setAiGeneratedItinerary] = useState(null);
   const [collections, setCollections] = useState(starterCollections);
   const [selectedCollectionId, setSelectedCollectionId] = useState(starterCollections[0].id);
   const [collectionPickerPlace, setCollectionPickerPlace] = useState(null);
@@ -419,13 +406,6 @@ export default function App() {
     icon: collectionIconOptions[0],
     color: collectionColorOptions[0],
   });
-  const [aiSelectedRegion, setAiSelectedRegion] = useState('');
-  const [aiSelectedDate, setAiSelectedDate] = useState(todayDateString());
-  const [aiCheckedPlaces, setAiCheckedPlaces] = useState([]);
-  const [isAiGenerating, setIsAiGenerating] = useState(false);
-  const [aiGenerationStep, setAiGenerationStep] = useState('');
-  const [aiGeneratedItinerary, setAiGeneratedItinerary] = useState(null);
-  const [showAiResult, setShowAiResult] = useState(false);
 
   const visiblePlaces = useMemo(() => {
     return places.filter((place) => {
@@ -437,7 +417,7 @@ export default function App() {
   }, [places, category, query]);
 
   const mapPlaces = useMemo(() => visiblePlaces.map(enrichPlace), [visiblePlaces]);
-  const mapSelectedPlace = useMemo(() => enrichPlace(selectedPlace), [selectedPlace]);
+  const mapSelectedPlace = useMemo(() => (selectedPlace ? enrichPlace(selectedPlace) : null), [selectedPlace]);
   const selectedCollection = useMemo(
     () => collections.find((item) => item.id === selectedCollectionId) || collections[0] || null,
     [collections, selectedCollectionId]
@@ -448,19 +428,6 @@ export default function App() {
       .map((placeId) => places.find((place) => place.id === placeId))
       .filter(Boolean);
   }, [places, selectedCollection]);
-  const selectedPlaceSaved = useMemo(
-    () => Boolean(selectedPlace?.id && places.some((place) => place.id === selectedPlace.id)),
-    [places, selectedPlace]
-  );
-  const placesByRegion = useMemo(() => {
-    return places.reduce((acc, place) => {
-      const region = getRegionOfAddress(place.address);
-      if (!acc[region]) acc[region] = [];
-      acc[region].push(place);
-      return acc;
-    }, {});
-  }, [places]);
-  const aiRegionPlaces = useMemo(() => placesByRegion[aiSelectedRegion] || [], [placesByRegion, aiSelectedRegion]);
   const routeSearchResults = useMemo(() => {
     const text = routeBaseQuery.trim().toLowerCase();
     const source = places.filter((place) => placeCoordinate(place));
@@ -469,10 +436,6 @@ export default function App() {
       .filter((place) => `${place.name} ${place.address} ${place.category}`.toLowerCase().includes(text))
       .slice(0, 8);
   }, [places, routeBaseQuery]);
-  const selectedRoute = useMemo(
-    () => routeExplore.routes.find((route) => route.mode === routeExplore.selectedMode),
-    [routeExplore.routes, routeExplore.selectedMode]
-  );
   const routeSelectionResponder = useMemo(
     () =>
       PanResponder.create({
@@ -642,192 +605,9 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    const regions = Object.keys(placesByRegion);
-    if (regions.length > 0 && (!aiSelectedRegion || !placesByRegion[aiSelectedRegion])) {
-      setAiSelectedRegion(regions[0]);
-    }
-  }, [placesByRegion, aiSelectedRegion]);
-
-  useEffect(() => {
-    setAiCheckedPlaces(aiRegionPlaces.map((place) => place.id));
-    setShowAiResult(false);
-  }, [aiSelectedRegion]);
-
   function showToast(message) {
     setToast(message);
     setTimeout(() => setToast(''), 1700);
-  }
-
-  function setPresetDate(type) {
-    if (type === 'today') setAiSelectedDate(todayDateString());
-    if (type === 'tomorrow') setAiSelectedDate(todayDateString(1));
-    if (type === 'weekend') setAiSelectedDate(weekendDateString());
-  }
-
-  function toggleAiPlace(placeId) {
-    setShowAiResult(false);
-    setAiCheckedPlaces((current) =>
-      current.includes(placeId) ? current.filter((id) => id !== placeId) : [...current, placeId]
-    );
-  }
-
-  function buildAiItinerary(selectedPlaces) {
-    const cafeCategory = categories[1]?.label;
-    const foodCategory = categories[2]?.label;
-    const stayCategory = categories[3]?.label;
-    const attractionCategory = categories[4]?.label;
-
-    const cafes = selectedPlaces.filter((place) => place.category === cafeCategory);
-    const restaurants = selectedPlaces.filter((place) => place.category === foodCategory);
-    const stays = selectedPlaces.filter((place) => place.category === stayCategory);
-    const attractions = selectedPlaces.filter((place) => place.category === attractionCategory);
-    const etc = selectedPlaces.filter(
-      (place) => ![cafeCategory, foodCategory, stayCategory, attractionCategory].includes(place.category)
-    );
-
-    const ordered = [];
-    const attractionQueue = [...attractions, ...etc];
-    const restaurantQueue = [...restaurants];
-    const cafeQueue = [...cafes];
-    const stayQueue = [...stays];
-
-    if (attractionQueue.length) ordered.push(attractionQueue.shift());
-    if (restaurantQueue.length) ordered.push(restaurantQueue.shift());
-    if (cafeQueue.length) ordered.push(cafeQueue.shift());
-    if (attractionQueue.length) ordered.push(attractionQueue.shift());
-    if (restaurantQueue.length) ordered.push(restaurantQueue.shift());
-    if (cafeQueue.length) ordered.push(cafeQueue.shift());
-    ordered.push(...attractionQueue, ...restaurantQueue, ...cafeQueue, ...stayQueue);
-
-    const currentTime = new Date();
-    currentTime.setHours(10, 30, 0, 0);
-
-    return ordered.map((place, index) => {
-      let activity = '방문 및 체험';
-      let duration = '1시간';
-      let durationMinutes = 60;
-      let tip = '혼잡한 시간대를 피해서 방문하면 사진과 이동 동선이 더 편해요.';
-
-      if (place.category === foodCategory) {
-        activity = currentTime.getHours() < 15 ? '점심 식사' : '식사 및 휴식';
-        duration = '1시간 20분';
-        durationMinutes = 80;
-        tip = `대표 메뉴 ${firstMenuName(place.menu)}를 먼저 확인하고, 피크타임 전후로 방문해보세요.`;
-      } else if (place.category === cafeCategory) {
-        activity = '카페 휴식과 디저트';
-        duration = '1시간';
-        durationMinutes = 60;
-        tip = `${firstMenuName(place.menu)}와 함께 사진 찍기 좋은 좌석을 먼저 잡는 걸 추천해요.`;
-      } else if (place.category === stayCategory) {
-        activity = '체크인 및 휴식';
-        duration = '숙박';
-        durationMinutes = 120;
-        tip = '숙소 체크인 시간을 기준으로 앞뒤 일정을 여유 있게 배치했어요.';
-      } else if (place.category === attractionCategory) {
-        activity = '관광과 산책';
-        duration = '1시간 30분';
-        durationMinutes = 90;
-        tip = '동선 중간에 배치하면 이동 피로를 줄이고 주변까지 자연스럽게 둘러볼 수 있어요.';
-      }
-
-      const time = timeText(currentTime);
-      const nextPlace = ordered[index + 1];
-      let transitToNext = null;
-
-      if (nextPlace) {
-        const distance = calculateDistanceMeters(place, nextPlace);
-        const isWalk = distance < 700;
-        const speedMetersPerMinute = isWalk ? 5000 / 60 : 30000 / 60;
-        const transitMinutes = Math.max(2, Math.round(distance / speedMetersPerMinute));
-        const distanceText = distance >= 1000 ? `${(distance / 1000).toFixed(1)}km` : `${Math.round(distance)}m`;
-        transitToNext = {
-          type: isWalk ? 'walk' : 'car',
-          duration: transitMinutes,
-          distance,
-          text: `${isWalk ? '도보' : '차량'} 이동 ${transitMinutes}분 (${distanceText})`,
-        };
-        addMinutes(currentTime, durationMinutes + transitMinutes);
-      }
-
-      return {
-        place,
-        time,
-        activity,
-        duration,
-        hoursCheck:
-          place.category === stayCategory
-            ? '체크인 가능 시간 확인 필요'
-            : `방문 시간 ${time} 기준 영업시간 확인 필요`,
-        tip,
-        transitToNext,
-      };
-    });
-  }
-
-  function runAiItineraryPlanner() {
-    if (aiCheckedPlaces.length === 0) {
-      showToast('일정에 넣을 장소를 1개 이상 선택해 주세요');
-      return;
-    }
-
-    const steps = [
-      'AI가 장소들의 영업시간과 주소를 분석하는 중...',
-      '장소 간 이동 거리와 적절한 이동 수단을 계산하는 중...',
-      '식사, 카페, 관광, 숙박 순서를 시간대에 맞게 정리하는 중...',
-      'AI 데일리 일정표를 완성하는 중...',
-    ];
-    let stepIndex = 0;
-
-    setIsAiGenerating(true);
-    setShowAiResult(false);
-    setAiGeneratedItinerary(null);
-    setAiGenerationStep(steps[stepIndex]);
-
-    const interval = setInterval(() => {
-      stepIndex += 1;
-      if (stepIndex < steps.length) {
-        setAiGenerationStep(steps[stepIndex]);
-        return;
-      }
-
-      clearInterval(interval);
-      const selectedPlaces = places.filter((place) => aiCheckedPlaces.includes(place.id));
-      setAiGeneratedItinerary(buildAiItinerary(selectedPlaces));
-      setIsAiGenerating(false);
-      setShowAiResult(true);
-      showToast('AI 일정표 생성 완료');
-    }, 650);
-  }
-
-  async function shareAiItinerary() {
-    if (!aiGeneratedItinerary?.length) return;
-    const body = aiGeneratedItinerary
-      .map((item, index) => {
-        const moveText = item.transitToNext ? `\n   ▼ 다음 장소로 이동: ${item.transitToNext.text}` : '';
-        return `📍 [STEP ${index + 1}] ${item.time} - ${item.place.name} (${item.place.category})\n   - 주요 활동: ${item.activity} (${item.duration})\n   - 영업 상태: ${item.hoursCheck}\n   - AI 꿀팁: "${item.tip}"${moveText}`;
-      })
-      .join('\n\n');
-    const message = `[스팟로그] AI 추천 ${aiSelectedRegion} 데일리 일정표 📅\n방문 예정일: ${aiSelectedDate}\nAI가 영업시간과 이동 거리를 최적화한 최상의 동선입니다!\n\n${body}`;
-
-    try {
-      await Share.share({ message });
-      showToast('AI 일정표 공유 준비 완료');
-    } catch {
-      showToast('공유를 열지 못했어요');
-    }
-  }
-
-  async function runTextExtraction(text = extractText) {
-    setExtracting(true);
-    setExtractStep('캡션 텍스트에서 장소 후보를 분석 중...');
-    setExtractResult(null);
-    setVerification(null);
-    await new Promise((resolve) => setTimeout(resolve, 750));
-    const result = inferPlaceFromText(text);
-    setExtractResult(result);
-    setVerification({ ...result, originalImage: uploadedImage, provider: 'local-text' });
-    setExtracting(false);
   }
 
   async function pickScreenshot() {
@@ -838,7 +618,7 @@ export default function App() {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ['images'],
       quality: 0.82,
       base64: true,
     });
@@ -883,22 +663,21 @@ export default function App() {
       ]);
 
       const payload = await response.json();
+
+      if (!response.ok) {
+        showToast(payload?.error || '장소 분석에 실패했어요. 다시 시도해주세요.');
+        setUploadedImage(null);
+        return;
+      }
+
       const result = normalizeExtractedPlace(payload, imagePayload);
       setExtractResult(result);
       setVerification(result);
-
-      if (result.provider === 'gemini') {
-        showToast('Gemini 이미지 분석 완료');
-      } else if (result.geminiError) {
-        showToast('Gemini 실패, fallback 결과 표시');
-      } else {
-        showToast('이미지 분석 결과 표시');
-      }
+      showToast('이미지 분석 완료');
     } catch (error) {
-      const fallback = inferPlaceFromImagePayload(promptHint || imagePayload);
-      setExtractResult(fallback);
-      setVerification({ ...fallback, originalImage: imagePayload, provider: 'local-fallback' });
-      showToast('서버 연결 실패, 앱 내부 추론으로 표시');
+      console.warn('Extract request failed', error);
+      showToast('서버에 연결할 수 없어요. PC 서버 실행과 Wi-Fi 연결을 확인해주세요.');
+      setUploadedImage(null);
     } finally {
       clearInterval(interval);
       setExtracting(false);
@@ -915,8 +694,7 @@ export default function App() {
       latitude: Number(source.latitude) || 37.5446,
       longitude: Number(source.longitude) || 127.0559,
       confidence: source.confidence || 0.9,
-      createdAt: source.createdAt || new Date().toISOString(),
-      screenshotText: source.screenshotText || extractText,
+      screenshotText: source.screenshotText || '',
       originalImage: source.originalImage || uploadedImage,
       pinColor: '#FFFFFF',
       collectionIds: [],
@@ -950,35 +728,6 @@ export default function App() {
         ]
       );
     }, 320);
-  }
-
-  function saveSelectedPlaceToMap() {
-    if (!selectedPlace?.name) return;
-    if (selectedPlaceSaved) {
-      showToast('이미 지도에 저장된 장소예요');
-      return;
-    }
-
-    const nextPlace = {
-      ...selectedPlace,
-      id: selectedPlace.id || `place-${Date.now()}`,
-      latitude: Number(selectedPlace.latitude ?? selectedPlace.lat) || 37.5446,
-      longitude: Number(selectedPlace.longitude ?? selectedPlace.lng) || 127.0559,
-      confidence: selectedPlace.confidence || 1,
-      createdAt: selectedPlace.createdAt || new Date().toISOString(),
-      screenshotText: selectedPlace.screenshotText || 'Google Maps POI',
-      pinColor: selectedPlace.pinColor || '#FFFFFF',
-      collectionIds: Array.isArray(selectedPlace.collectionIds) ? selectedPlace.collectionIds : [],
-    };
-
-    setPlaces((current) => [nextPlace, ...current]);
-    setSelectedPlace(nextPlace);
-    savePlaceToFirestore(nextPlace)
-      .then(() => showToast(`${nextPlace.name} DB 저장 완료`))
-      .catch((error) => {
-        console.warn('Failed to save selected place', error);
-        showToast('지도 저장 완료, DB 저장은 실패했어요');
-      });
   }
 
   function openCollectionPicker(place) {
@@ -1204,7 +953,6 @@ export default function App() {
     setRouteBaseQuery(base.name);
     setRoutePlaces(nextRoute);
     setAiSelectedRegion(getRegionOfAddress(base.address));
-    setAiCheckedPlaces(nextRoute.map((place) => place.id));
     showToast(`${base.name} 기준으로 가까운 순서 동선을 만들었어요`);
     return { base, route: nextRoute };
   }
@@ -1214,7 +962,6 @@ export default function App() {
     if (!result) return;
     setRouteSelectMode(false);
     setRouteScheduleOpen(true);
-    setShowAiResult(false);
     setAiGeneratedItinerary(null);
     setRouteScheduleProvider('');
   }
@@ -1236,7 +983,6 @@ export default function App() {
     setRouteScheduleLoading(true);
     setAiSelectedDate(routeScheduleDate);
     setAiSelectedRegion(getRegionOfAddress(base.address));
-    setAiGenerationStep('Gemini가 기준점, 영업시간, 이동거리를 분석 중...');
 
     const fallback = buildSmartItinerary(base, orderedPlaces);
     let nextItinerary = fallback;
@@ -1266,10 +1012,27 @@ export default function App() {
     }
 
     setAiGeneratedItinerary(nextItinerary);
-    setShowAiResult(true);
     setRouteScheduleProvider(provider);
     setRouteScheduleLoading(false);
     showToast(provider === 'gemini' ? 'Gemini AI 일정표 생성 완료' : '기본 AI 일정표 생성 완료');
+  }
+
+  async function shareAiItinerary() {
+    if (!aiGeneratedItinerary?.length) return;
+    const body = aiGeneratedItinerary
+      .map((item, index) => {
+        const moveText = item.transitToNext ? `\n   ▼ 다음 장소로 이동: ${item.transitToNext.text}` : '';
+        return `📍 [STEP ${index + 1}] ${item.time} - ${item.place.name} (${item.place.category})\n   - 주요 활동: ${item.activity} (${item.duration})\n   - 영업 상태: ${item.hoursCheck}\n   - AI 꿀팁: "${item.tip}"${moveText}`;
+      })
+      .join('\n\n');
+    const message = `[스팟로그] AI 추천 ${aiSelectedRegion} 데일리 일정표 📅\n방문 예정일: ${aiSelectedDate}\nAI가 영업시간과 이동 거리를 최적화한 최상의 동선입니다!\n\n${body}`;
+
+    try {
+      await Share.share({ message });
+      showToast('AI 일정표 공유 준비 완료');
+    } catch {
+      showToast('공유를 열지 못했어요');
+    }
   }
 
   function handleMapSelectPlace(placeId) {
@@ -1464,8 +1227,7 @@ export default function App() {
 
       if (firstReady) {
         mapRef.current?.renderRoutePolyline(firstReady.encodedPolyline);
-        const summary = routeDisplayText(firstReady);
-        showToast(summary ? `${routeModeLabel(firstReady.mode)} ${summary}` : `${selectedPlace.name}까지 경로를 표시했어요`);
+        showToast(`${selectedPlace.name}까지 경로를 표시했어요`);
       } else {
         mapRef.current?.clearRoutePolyline();
         showToast(firstMessage);
@@ -1583,12 +1345,6 @@ export default function App() {
                   <Text style={styles.infoText}>{normalizeMenu(selectedPlace.menu)}</Text>
                 </View>
               </View>
-              {!selectedPlaceSaved ? (
-                <TouchableOpacity style={[styles.secondaryButton, styles.detailSaveButton]} activeOpacity={0.86} onPress={saveSelectedPlaceToMap}>
-                  <Ionicons name="bookmark-outline" size={18} color="#3182F6" />
-                  <Text style={styles.secondaryButtonText}>지도에 저장하기</Text>
-                </TouchableOpacity>
-              ) : null}
               <TouchableOpacity
                 style={styles.routeExploreButton}
                 activeOpacity={0.86}
@@ -1604,24 +1360,6 @@ export default function App() {
                   {routeExplore.status === 'loading' ? '경로 계산 중' : '경로 탐색'}
                 </Text>
               </TouchableOpacity>
-
-              {selectedRoute ? (
-                <View style={styles.routeSummaryBox}>
-                  <View style={styles.routeSummaryTop}>
-                    <Ionicons
-                      name={selectedRoute.mode === 'WALK' ? 'walk-outline' : selectedRoute.mode === 'BICYCLE' ? 'bicycle-outline' : 'bus-outline'}
-                      size={18}
-                      color="#E53935"
-                    />
-                    <Text style={styles.routeSummaryTitle}>
-                      {routeModeLabel(selectedRoute.mode)} {routeDisplayText(selectedRoute) || '계산 완료'}
-                    </Text>
-                  </View>
-                  <Text style={styles.routeSummarySub}>
-                    {selectedRoute.estimated ? 'Google 경로가 없어 거리 기반으로 예상한 시간입니다.' : 'Google 경로 API 기준 예상 시간입니다.'}
-                  </Text>
-                </View>
-              ) : null}
 
               {routeExplore.routes.length > 0 || routeExplore.message ? (
                 <View style={styles.routeModeRow}>
@@ -1641,7 +1379,7 @@ export default function App() {
                           {mode.label}
                         </Text>
                         <Text style={[styles.routeModeValue, selected && styles.routeModeLabelOn]}>
-                          {ready ? routeDisplayText(route) || '계산 완료' : '불가'}
+                          {ready ? route.durationText || route.distanceText : '불가'}
                         </Text>
                       </TouchableOpacity>
                     );
@@ -1701,22 +1439,6 @@ export default function App() {
               </View>
             ) : null}
 
-            <Text style={styles.settingDesc}>원클릭 데모 캡처로 즉시 테스트해보세요.</Text>
-            <View style={styles.demoRow}>
-              {demoScreenshots.map((demo, index) => (
-                <TouchableOpacity
-                  key={demo.name}
-                  style={styles.demoChip}
-                  onPress={() => {
-                    setUploadedImage(demo.imageUrl);
-                    triggerCaptureExtraction(demo.imageUrl, demo.promptHint);
-                  }}
-                >
-                  <Text style={styles.demoChipText}>데모 {index + 1}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
             {extracting ? (
               <View style={styles.extractingBox}>
                 <ActivityIndicator color="#3182F6" />
@@ -1725,31 +1447,11 @@ export default function App() {
             ) : null}
           </Glass>
 
-          <Glass style={styles.card}>
-            <View style={styles.badge}>
-              <Ionicons name="sparkles" size={15} color="#3182F6" />
-              <Text style={styles.badgeText}>캡션 텍스트 보조 분석</Text>
-            </View>
-            <TextInput
-              multiline
-              value={extractText}
-              onChangeText={setExtractText}
-              style={styles.textArea}
-              placeholder="공유 URL 또는 캡션 텍스트"
-              placeholderTextColor="#8B95A1"
-            />
-            <TouchableOpacity style={styles.primaryButton} onPress={() => runTextExtraction()}>
-              <Ionicons name="search" size={18} color="#FFFFFF" />
-              <Text style={styles.primaryButtonText}>텍스트로 분석하기</Text>
-            </TouchableOpacity>
-          </Glass>
-
           {verification && (
             <Glass style={styles.card}>
               <Text style={styles.resultConfidence}>
-                {verification.provider === 'gemini' ? 'Gemini 분석' : verification.geminiError ? 'Fallback 분석' : '자동 추론'} · {Math.round((verification.confidence || 0.9) * 100)}%
+                Gemini 분석 · {Math.round((verification.confidence || 0.9) * 100)}%
               </Text>
-              {verification.geminiError ? <Text style={styles.settingDesc}>Gemini 오류: {verification.geminiError}</Text> : null}
               <Text style={styles.resultTitle}>검증 후 저장</Text>
 
               <Text style={styles.fieldLabel}>장소명</Text>
@@ -1789,181 +1491,6 @@ export default function App() {
       )}
 
       {tab === 'plan' && (
-        <ScrollView contentContainerStyle={styles.page}>
-          <Text style={styles.pageTitle}>AI 일정표</Text>
-          <Glass style={styles.card}>
-            <View style={styles.badge}>
-              <Ionicons name="sparkles" size={15} color="#3182F6" />
-              <Text style={styles.badgeText}>AI 최적 데일리 일정 플래너</Text>
-            </View>
-            <Text style={styles.cardTitle}>저장한 핫플의 지역, 영업시간, 카테고리, 이동거리를 분석해 하루 일정표를 생성합니다.</Text>
-          </Glass>
-
-          {isAiGenerating ? (
-            <Glass style={styles.aiLoadingCard}>
-              <ActivityIndicator color="#FF7A00" size="large" />
-              <Text style={styles.aiLoadingTitle}>AI 엔진 가동 중...</Text>
-              <Text style={styles.aiLoadingText}>{aiGenerationStep}</Text>
-            </Glass>
-          ) : null}
-
-          {!isAiGenerating && !showAiResult ? (
-            <>
-              <Glass style={styles.card}>
-                <Text style={styles.fieldLabel}>1단계: 방문 지역 선택</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.aiRegionRow}>
-                  {Object.keys(placesByRegion).map((region) => {
-                    const active = aiSelectedRegion === region;
-                    return (
-                      <TouchableOpacity
-                        key={region}
-                        style={[styles.aiRegionChip, active && styles.aiRegionChipOn]}
-                        activeOpacity={0.82}
-                        onPress={() => setAiSelectedRegion(region)}
-                      >
-                        <Text style={[styles.aiRegionText, active && styles.aiRegionTextOn]}>{region}</Text>
-                        <Text style={[styles.aiRegionCount, active && styles.aiRegionTextOn]}>{placesByRegion[region].length}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-
-                <Text style={styles.fieldLabel}>2단계: 방문 일정 지정</Text>
-                <TextInput
-                  value={aiSelectedDate}
-                  onChangeText={setAiSelectedDate}
-                  placeholder="YYYY-MM-DD"
-                  placeholderTextColor="#8B95A1"
-                  style={styles.fieldInput}
-                />
-                <View style={styles.aiDateRow}>
-                  {[
-                    ['today', '오늘'],
-                    ['tomorrow', '내일'],
-                    ['weekend', '이번 주말'],
-                  ].map(([key, label]) => (
-                    <TouchableOpacity key={key} style={styles.aiDateButton} activeOpacity={0.82} onPress={() => setPresetDate(key)}>
-                      <Text style={styles.aiDateButtonText}>{label}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </Glass>
-
-              <Glass style={styles.card}>
-                <View style={styles.aiSectionHeader}>
-                  <Text style={styles.fieldLabel}>3단계: 일정에 넣을 스팟 지정</Text>
-                  <View style={styles.aiMiniActions}>
-                    <TouchableOpacity activeOpacity={0.82} onPress={() => setAiCheckedPlaces(aiRegionPlaces.map((place) => place.id))}>
-                      <Text style={styles.aiMiniActionText}>전체 선택</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity activeOpacity={0.82} onPress={() => setAiCheckedPlaces([])}>
-                      <Text style={styles.aiMiniActionTextMuted}>전체 해제</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-
-                {aiRegionPlaces.length === 0 ? (
-                  <View style={styles.aiEmptyBox}>
-                    <Ionicons name="information-circle-outline" size={22} color="#FF7A00" />
-                    <Text style={styles.detailDesc}>선택한 지역에 저장된 장소가 없습니다. 캡처 탭에서 장소를 먼저 등록해 주세요.</Text>
-                  </View>
-                ) : (
-                  aiRegionPlaces.map((place) => {
-                    const checked = aiCheckedPlaces.includes(place.id);
-                    return (
-                      <TouchableOpacity
-                        key={place.id}
-                        style={[styles.aiPlaceRow, checked && styles.aiPlaceRowOn]}
-                        activeOpacity={0.82}
-                        onPress={() => toggleAiPlace(place.id)}
-                      >
-                        <Ionicons name={checked ? 'checkbox' : 'square-outline'} size={22} color={checked ? '#3182F6' : '#8B95A1'} />
-                        <View style={[styles.collectionPlaceIcon, { backgroundColor: colorForCategory(place.category) }]}>
-                          <Ionicons name={iconForCategory(place.category)} size={15} color="#FFFFFF" />
-                        </View>
-                        <View style={styles.flex}>
-                          <Text style={styles.routeTitle}>{place.name}</Text>
-                          <Text style={styles.routeMeta}>{place.category} · {place.hours}</Text>
-                        </View>
-                      </TouchableOpacity>
-                    );
-                  })
-                )}
-              </Glass>
-
-              <TouchableOpacity
-                style={[styles.aiGenerateButton, aiCheckedPlaces.length === 0 && styles.aiGenerateButtonOff]}
-                activeOpacity={0.86}
-                disabled={aiCheckedPlaces.length === 0}
-                onPress={runAiItineraryPlanner}
-              >
-                <Ionicons name="sparkles" size={18} color="#FFFFFF" />
-                <Text style={styles.aiGenerateText}>AI 최적 하루 일정 생성하기</Text>
-              </TouchableOpacity>
-            </>
-          ) : null}
-
-          {!isAiGenerating && showAiResult && aiGeneratedItinerary ? (
-            <>
-              <View style={styles.aiResultTop}>
-                <TouchableOpacity activeOpacity={0.82} onPress={() => setShowAiResult(false)}>
-                  <Text style={styles.aiEditText}>조건 다시 수정하기</Text>
-                </TouchableOpacity>
-                <View style={styles.aiDoneBadge}>
-                  <Text style={styles.aiDoneText}>AI 동선 정렬 완료</Text>
-                </View>
-              </View>
-
-              <Glass style={styles.card}>
-                <View style={styles.aiScheduleHeader}>
-                  <Ionicons name="calendar-outline" size={20} color="#FF7A00" />
-                  <View style={styles.flex}>
-                    <Text style={styles.resultTitle}>{aiSelectedRegion} 데일리 코스</Text>
-                    <Text style={styles.routeMeta}>{aiSelectedDate} · {aiGeneratedItinerary.length}곳 최적 방문</Text>
-                  </View>
-                </View>
-
-                {aiGeneratedItinerary.map((item, index) => (
-                  <View key={`${item.place.id}-${index}`} style={styles.aiTimelineBlock}>
-                    <View style={styles.aiTimelineDot}>
-                      <Text style={styles.aiTimelineDotText}>{index + 1}</Text>
-                    </View>
-                    <View style={styles.aiTimelineCard}>
-                      <View style={styles.aiTimelineTop}>
-                        <Text style={styles.timelineTime}>{item.time}</Text>
-                        <Text style={styles.aiDurationText}>{item.duration}</Text>
-                      </View>
-                      <Text style={styles.routeTitle}>{item.place.name}</Text>
-                      <Text style={styles.routeMeta}>{item.place.address}</Text>
-                      <View style={styles.aiActivityBox}>
-                        <Ionicons name="sparkles-outline" size={14} color="#3182F6" />
-                        <Text style={styles.aiActivityText}>{item.activity}</Text>
-                      </View>
-                      <View style={styles.aiTipBox}>
-                        <Text style={styles.aiTipText}>AI 팁: {item.tip}</Text>
-                      </View>
-                      <Text style={styles.aiHoursText}>{item.hoursCheck}</Text>
-                    </View>
-                    {item.transitToNext ? (
-                      <View style={styles.aiMoveBox}>
-                        <Ionicons name={item.transitToNext.type === 'walk' ? 'walk-outline' : 'car-outline'} size={14} color="#E53935" />
-                        <Text style={styles.aiMoveText}>{item.transitToNext.text}</Text>
-                      </View>
-                    ) : null}
-                  </View>
-                ))}
-              </Glass>
-
-              <TouchableOpacity style={styles.primaryButton} activeOpacity={0.86} onPress={shareAiItinerary}>
-                <Ionicons name="share-outline" size={18} color="#FFFFFF" />
-                <Text style={styles.primaryButtonText}>AI 일정표 전체 공유</Text>
-              </TouchableOpacity>
-            </>
-          ) : null}
-        </ScrollView>
-      )}
-
-      {false && tab === 'plan' && (
         <ScrollView contentContainerStyle={styles.page}>
           <Text style={styles.pageTitle}>AI 일정표</Text>
           <Glass style={styles.card}>
@@ -2075,7 +1602,7 @@ export default function App() {
           <Text style={styles.pageTitle}>설정</Text>
           <Glass style={styles.card}>
             <Text style={styles.cardTitle}>PinSnap Archive</Text>
-            <Text style={styles.detailDesc}>캡처 이미지는 서버의 Gemini API로 분석하고, 실패하면 앱 내부 fallback을 표시합니다.</Text>
+            <Text style={styles.detailDesc}>캡처 이미지는 서버의 Gemini API로 분석하고, 저장한 장소는 Firestore에 동기화됩니다.</Text>
           </Glass>
         </ScrollView>
       )}
@@ -2110,8 +1637,8 @@ export default function App() {
               <Ionicons name="search-outline" size={18} color="#FFFFFF" />
             </View>
             <TouchableOpacity style={styles.flex} activeOpacity={0.82} onPress={() => setRouteSearchOpen(true)}>
-              <Text style={styles.routeGuideTitle}>동선 영역 검색</Text>
-              <Text style={styles.routeGuideSub}>{routeBasePlace ? routeBasePlace.name : '숙소나 기준 장소를 입력해 주세요'}</Text>
+              <Text style={styles.routeGuideTitle}>?? ?? ??</Text>
+              <Text style={styles.routeGuideSub}>{routeBasePlace ? routeBasePlace.name : '??? ?? ??? ??? ???'}</Text>
             </TouchableOpacity>
             <TouchableOpacity activeOpacity={0.78} onPress={closeRouteSelectMode}>
               <Ionicons name="close" size={22} color="#111827" />
@@ -2125,7 +1652,7 @@ export default function App() {
                 <TextInput
                   value={routeBaseQuery}
                   onChangeText={setRouteBaseQuery}
-                  placeholder="숙소 이름, 장소명, 주소 검색"
+                  placeholder="?? ??, ???, ?? ??"
                   placeholderTextColor="#8B95A1"
                   style={styles.routeSearchInput}
                   autoFocus
@@ -2144,7 +1671,7 @@ export default function App() {
                   </TouchableOpacity>
                 ))}
                 {routeSearchResults.length === 0 ? (
-                  <Text style={styles.routeEmptyText}>저장된 장소에서 검색 결과가 없어요. 먼저 캡처나 지도에서 장소를 등록해 주세요.</Text>
+                  <Text style={styles.routeEmptyText}>??? ???? ?? ??? ???. ?? ??? ???? ??? ??? ???.</Text>
                 ) : null}
               </ScrollView>
             </Glass>
@@ -2152,15 +1679,15 @@ export default function App() {
 
           <Glass style={styles.routeResultSheet}>
             <View style={styles.routeResultTop}>
-              <Text style={styles.routeResultTitle}>스마트 동선</Text>
+              <Text style={styles.routeResultTitle}>??? ??</Text>
               <TouchableOpacity style={styles.routeDoneButton} activeOpacity={0.82} onPress={completeSmartRoute}>
-                <Text style={styles.routeDoneText}>완료</Text>
+                <Text style={styles.routeDoneText}>??</Text>
               </TouchableOpacity>
             </View>
             {routePlaces.length > 0 ? (
               <TouchableOpacity style={styles.routeScheduleButton} activeOpacity={0.84} onPress={openSmartSchedulePage}>
                 <Ionicons name="calendar-outline" size={17} color="#FFFFFF" />
-                <Text style={styles.routeScheduleButtonText}>일정 생성</Text>
+                <Text style={styles.routeScheduleButtonText}>?? ??</Text>
               </TouchableOpacity>
             ) : null}
           </Glass>

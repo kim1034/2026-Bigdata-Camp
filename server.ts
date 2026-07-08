@@ -1,72 +1,185 @@
-import express from 'express';
-import path from 'path';
-import dotenv from 'dotenv';
-import { createServer as createHttpServer } from 'http';
-import { GoogleGenAI } from '@google/genai';
-import { createServer as createViteServer } from 'vite';
+import express from "express";
+import path from "path";
+import dotenv from "dotenv";
+import { GoogleGenAI, Type } from "@google/genai";
+import { createServer as createViteServer } from "vite";
 
-dotenv.config();
+// Load environment variables (.env.local takes precedence, per README setup instructions)
+dotenv.config({ path: [".env.local", ".env"] });
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const isProduction = process.env.NODE_ENV === 'production';
-const httpServer = createHttpServer(app);
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
-app.use(express.json({ limit: '30mb' }));
-app.use(express.urlencoded({ limit: '30mb', extended: true }));
+// Set body parser to handle large base64 screenshot images
+app.use(express.json({ limit: "20mb" }));
+app.use(express.urlencoded({ limit: "20mb", extended: true }));
 
-type PlaceResult = {
-  name: string;
-  category: '카페' | '맛집' | '숙박' | '관광지';
-  address: string;
-  latitude: number;
-  longitude: number;
-  hours: string;
-  menu: Array<{ name: string; price: string }>;
-  reviewSummary: string;
-  screenshotText: string;
-  confidence: number;
-  provider?: string;
-};
+// Initialize Gemini API Client
+let ai: GoogleGenAI | null = null;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-function normalizeCategory(value: unknown): PlaceResult['category'] {
-  const text = String(value || '');
-  if (text.includes('맛') || text.includes('식') || text.includes('레스토랑')) return '맛집';
-  if (text.includes('숙') || text.includes('호텔') || text.includes('펜션') || text.includes('스테이')) return '숙박';
-  if (text.includes('관광') || text.includes('공원') || text.includes('전시') || text.includes('체험')) return '관광지';
-  return '카페';
+if (GEMINI_API_KEY && GEMINI_API_KEY !== "MY_GEMINI_API_KEY") {
+  try {
+    ai = new GoogleGenAI({
+      apiKey: GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+    console.log("Gemini API Client initialized successfully.");
+  } catch (error) {
+    console.error("Failed to initialize Gemini API client:", error);
+  }
+} else {
+  console.log("GEMINI_API_KEY not set. /api/extract will return 503 until it is configured in .env.local.");
 }
 
-function normalizeMenu(value: unknown): Array<{ name: string; price: string }> {
-  if (Array.isArray(value)) {
-    return value.slice(0, 4).map((item) => {
-      if (typeof item === 'string') return { name: item, price: '정보 없음' };
-      return {
-        name: String(item?.name || '대표 메뉴'),
-        price: String(item?.price || '정보 없음'),
-      };
+// Health check endpoint (used by the mobile app to verify server availability)
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    app: "PinSnap Archive",
+    gemini: Boolean(ai),
+  });
+});
+
+// API Route for screenshot analysis
+app.post("/api/extract", async (req, res) => {
+  try {
+    const { image } = req.body; // base64 data URL string
+
+    if (!image || typeof image !== "string") {
+      return res.status(400).json({ error: "이미지 데이터가 누락되었습니다." });
+    }
+
+    if (!ai) {
+      return res.status(503).json({
+        error: "GEMINI_API_KEY가 설정되지 않아 분석을 수행할 수 없습니다. .env.local 파일을 확인해주세요.",
+      });
+    }
+
+    const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
+    const mimeType = image.match(/^data:(image\/\w+);base64,/)?.[1] || "image/png";
+
+    console.log(`Calling ${GEMINI_MODEL} for screenshot OCR & place extraction...`);
+
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: [
+        {
+          inlineData: {
+            mimeType: mimeType,
+            data: base64Data,
+          },
+        },
+        {
+          text: `You are an advanced South Korean Place Extractor and OCR engine.
+Analyze this screenshot (from Instagram, Blog, Map, or Chat) and do the following:
+1. Extract all text via OCR.
+2. Search and infer the business/place name (가게명/장소명) and the specific region/neighborhood in South Korea (e.g. 성수동, 한남동, 홍대, 강릉, 제주 등).
+3. Determine its category exactly as one of the following: "카페", "식당", "펜션/숙소", "관광지/기타".
+4. Gather or simulate realistic high-quality Google Places data for this place:
+   - Full exact Korean address (도로명 주소).
+   - Accurate South Korea Latitude and Longitude (near Seoul or its identified region) so it can be correctly plotted on our Leaflet map. (Crucial: MUST be in South Korea, Latitude around 35.0-38.5, Longitude around 126.0-129.5).
+   - Standard Operating Hours in Korean (영업시간).
+   - Representative menu items (대표 메뉴) up to 3 items, showing name and price (e.g., "15,000원").
+   - A detailed Korean review summary (리뷰 요약) reflecting the overall public feedback (around 2-3 sentences).
+   - A short snippet of the extracted text or hashtag that led to this detection.
+
+You MUST respond strictly in JSON format matching the schema provided.`,
+        },
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            name: {
+              type: Type.STRING,
+              description: "The name of the place (e.g., 어니언 성수, 난포 성수).",
+            },
+            category: {
+              type: Type.STRING,
+              description: "Must be exactly one of: '카페', '식당', '펜션/숙소', '관광지/기타'",
+            },
+            address: {
+              type: Type.STRING,
+              description: "The complete South Korean road address (도로명 주소).",
+            },
+            latitude: {
+              type: Type.NUMBER,
+              description: "The latitude coordinate (e.g., 37.5446). Must be in South Korea.",
+            },
+            longitude: {
+              type: Type.NUMBER,
+              description: "The longitude coordinate (e.g., 127.0559). Must be in South Korea.",
+            },
+            hours: {
+              type: Type.STRING,
+              description: "Operating hours (e.g., 매일 11:00 - 22:00).",
+            },
+            menu: {
+              type: Type.ARRAY,
+              description: "List of 2-3 popular menu items.",
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING, description: "Menu name." },
+                  price: { type: Type.STRING, description: "Menu price (e.g., 12,000원)." },
+                },
+                required: ["name", "price"],
+              },
+            },
+            reviewSummary: {
+              type: Type.STRING,
+              description: "A summary of user reviews in Korean (2-3 sentences, engaging and helpful).",
+            },
+            screenshotText: {
+              type: Type.STRING,
+              description: "Brief extracted OCR text or hashtags from the image.",
+            },
+          },
+          required: [
+            "name",
+            "category",
+            "address",
+            "latitude",
+            "longitude",
+            "hours",
+            "menu",
+            "reviewSummary",
+            "screenshotText",
+          ],
+        },
+      },
+    });
+
+    const jsonText = response.text?.trim();
+    if (!jsonText) {
+      throw new Error("Gemini returned an empty response.");
+    }
+
+    const data = JSON.parse(jsonText);
+
+    // Validate latitude/longitude — without valid coordinates the pin cannot be placed
+    data.latitude = Number(data.latitude);
+    data.longitude = Number(data.longitude);
+    if (isNaN(data.latitude) || isNaN(data.longitude)) {
+      throw new Error(`Invalid coordinates in Gemini response: ${data.latitude}, ${data.longitude}`);
+    }
+
+    console.log("Extracted Place Data successfully:", data.name, `Coords: ${data.latitude}, ${data.longitude}`);
+    return res.json(data);
+  } catch (error) {
+    console.error("Error in /api/extract:", error);
+    return res.status(500).json({
+      error: "장소 분석에 실패했습니다. 잠시 후 다시 시도해주세요.",
     });
   }
-
-  const text = String(value || '').trim();
-  return text ? [{ name: text, price: '정보 없음' }] : [{ name: '대표 메뉴', price: '정보 없음' }];
-}
-
-function normalizePlaceResult(raw: any, fallbackText: string, provider: string): PlaceResult {
-  return {
-    name: String(raw?.name || '분석된 장소'),
-    category: normalizeCategory(raw?.category),
-    address: String(raw?.address || '주소 확인 필요'),
-    latitude: Number(raw?.latitude) || 37.5446,
-    longitude: Number(raw?.longitude) || 127.0559,
-    hours: String(raw?.hours || '영업시간 확인 필요'),
-    menu: normalizeMenu(raw?.menu),
-    reviewSummary: String(raw?.reviewSummary || raw?.review_summary || '이미지 분석 결과를 바탕으로 저장된 장소입니다.'),
-    screenshotText: String(raw?.screenshotText || raw?.screenshot_text || fallbackText || '캡처 이미지 분석 결과'),
-    confidence: Math.max(0, Math.min(1, Number(raw?.confidence) || 0.82)),
-    provider,
-  };
-}
+});
 
 function safeJsonParse(text: string) {
   try {
@@ -83,186 +196,67 @@ function safeJsonParse(text: string) {
 }
 
 async function generateItineraryWithGemini(payload: any) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY가 설정되어 있지 않습니다.');
+  if (!ai) {
+    throw new Error("GEMINI_API_KEY is not configured.");
   }
 
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL || process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash';
   const places = Array.isArray(payload?.places) ? payload.places : [];
   const basePlace = payload?.basePlace || null;
-  const visitDate = String(payload?.visitDate || '');
+  const visitDate = String(payload?.visitDate || "");
 
   const response = await ai.models.generateContent({
-    model,
+    model: GEMINI_MODEL,
     contents: [
       {
         text: [
-          '너는 한국 여행 일정표를 만드는 모바일 앱의 AI 플래너야.',
-          '기준점에서 가까운 순서로 정렬된 장소 목록을 바탕으로 하루 일정표를 만들어줘.',
-          '반드시 JSON만 반환해. 마크다운 코드블록은 쓰지 마.',
-          'JSON 필드: title, summary, steps',
-          'steps는 배열이고 각 항목 필드: time, placeName, category, activity, duration, hoursStatus, tip, moveToNext',
-          'moveToNext는 마지막 장소면 빈 문자열, 아니면 "🚶 도보 이동 7분 (547m)" 같은 형식으로 써.',
-          '영업시간 정보가 부족하면 "영업시간 확인 필요"라고 명확히 써.',
+          "너는 한국 여행 일정표를 만드는 모바일 앱의 AI 플래너야.",
+          "기준점에서 가까운 순서로 정렬된 장소 목록을 바탕으로 하루 일정표를 만들어줘.",
+          "반드시 JSON만 반환해. 마크다운 코드블록은 쓰지 마.",
+          "JSON 필드: title, summary, steps",
+          "steps는 배열이고 각 항목 필드: time, placeName, category, activity, duration, hoursStatus, tip, moveToNext",
+          "moveToNext는 마지막 장소면 빈 문자열, 아니면 \"도보 이동 7분 (547m)\" 같은 형식으로 써.",
+          "영업시간 정보가 부족하면 \"영업시간 확인 필요\"라고 명확히 써.",
           `방문 예정일: ${visitDate}`,
-          `기준점: ${basePlace ? JSON.stringify(basePlace) : '사용자 입력 기준점'}`,
+          `기준점: ${basePlace ? JSON.stringify(basePlace) : "사용자 입력 기준점"}`,
           `장소 목록: ${JSON.stringify(places)}`,
-        ].join('\n'),
+        ].join("\n"),
       },
     ],
     config: {
-      responseMimeType: 'application/json',
+      responseMimeType: "application/json",
     },
   });
 
-  const parsed = safeJsonParse(response.text || '');
+  const parsed = safeJsonParse(response.text || "");
   if (!parsed) {
-    throw new Error('Gemini 일정표 응답을 해석하지 못했습니다.');
+    throw new Error("Gemini itinerary response could not be parsed.");
   }
-
   return parsed;
 }
 
-function inferMockPlace(text: string): PlaceResult {
-  const value = text.toLowerCase();
-
-  if (text.includes('숙소') || text.includes('스테이') || text.includes('한옥') || text.includes('펜션')) {
-    return {
-      name: value.includes('제주') ? '제주 감성 독채 펜션' : '스테이 한옥',
-      category: '숙박',
-      address: value.includes('제주') ? '제주 제주시 애월읍' : '서울 종로구 자하문로',
-      latitude: value.includes('제주') ? 33.4631 : 37.5802,
-      longitude: value.includes('제주') ? 126.3104 : 126.9691,
-      hours: '체크인 15:00 / 체크아웃 11:00',
-      menu: [{ name: '감성 숙소 1박', price: '320,000원' }],
-      reviewSummary: '캡처 이미지에서 숙소 키워드를 감지해 조용한 숙박 코스로 분류했습니다.',
-      screenshotText: text,
-      confidence: 0.86,
-      provider: 'mock',
-    };
+app.post("/api/ai/itinerary", async (req, res) => {
+  const places = Array.isArray(req.body?.places) ? req.body.places : [];
+  if (places.length === 0) {
+    return res.status(400).json({
+      error: "EMPTY_PLACES",
+      message: "일정표를 만들 장소가 필요합니다.",
+    });
   }
 
-  if (text.includes('맛집') || text.includes('식당') || text.includes('국수') || text.includes('덮밥') || text.includes('파스타')) {
-    return {
-      name: value.includes('한남') ? '한남동 퓨전 파스타' : '쵸리상경 성수',
-      category: '맛집',
-      address: value.includes('한남') ? '서울 용산구 한남동' : '서울 성동구 서울숲길 18',
-      latitude: value.includes('한남') ? 37.5344 : 37.5471,
-      longitude: value.includes('한남') ? 127.0008 : 127.0425,
-      hours: '매일 11:00 - 21:30',
-      menu: [
-        { name: value.includes('파스타') ? '시그니처 파스타' : '갈릭 덮밥', price: '12,000원' },
-        { name: value.includes('파스타') ? '글라스 와인' : '고기 국수', price: '14,000원' },
-      ],
-      reviewSummary: '식사 관련 키워드와 지역 맥락을 함께 보고 맛집으로 저장합니다.',
-      screenshotText: text,
-      confidence: 0.88,
-      provider: 'mock',
-    };
+  try {
+    const itinerary = await generateItineraryWithGemini(req.body);
+    return res.json({ provider: "gemini", itinerary });
+  } catch (error) {
+    console.error("[Gemini itinerary generation failed]", error);
+    return res.json({
+      provider: "fallback",
+      geminiError: error instanceof Error ? error.message : "Gemini 일정 생성 실패",
+      itinerary: null,
+    });
   }
+});
 
-  return {
-    name: value.includes('onion') || text.includes('어니언') ? '어니언 성수' : '무브모브 성수',
-    category: '카페',
-    address: '서울 성동구 성수이로',
-    latitude: 37.5438,
-    longitude: 127.0569,
-    hours: '매일 10:30 - 22:00',
-    menu: [
-      { name: '크림 라떼', price: '6,500원' },
-      { name: '수제 케이크', price: '8,000원' },
-    ],
-    reviewSummary: '릴스 저장 반응이 높은 성수 디저트 카페로 자동 분류했습니다.',
-    screenshotText: text,
-    confidence: 0.93,
-    provider: 'mock',
-  };
-}
-
-function inferImagePrompt(image: string, promptHint = '') {
-  const value = `${image} ${promptHint}`.toLowerCase();
-  if (value.includes('607377') || value.includes('hotel') || value.includes('pension') || value.includes('제주')) {
-    return '제주 감성 독채 펜션 숙소 캡처 OCR 결과';
-  }
-  if (value.includes('151724') || value.includes('restaurant') || value.includes('pasta') || value.includes('한남')) {
-    return '한남동 퓨전 파스타 맛집 캡처 OCR 결과';
-  }
-  return '성수 대형 에스프레소 바 카페 캡처 OCR 결과';
-}
-
-function parseDataUriImage(image: string) {
-  const match = image.match(/^data:([^;]+);base64,(.+)$/);
-  if (!match) return null;
-  return {
-    mimeType: match[1] || 'image/jpeg',
-    data: match[2],
-  };
-}
-
-async function imageToInlineData(image: string) {
-  const dataUri = parseDataUriImage(image);
-  if (dataUri) return dataUri;
-
-  if (/^https?:\/\//i.test(image)) {
-    const response = await fetch(image);
-    if (!response.ok) {
-      throw new Error(`이미지를 불러오지 못했습니다. (${response.status})`);
-    }
-    const contentType = response.headers.get('content-type') || 'image/jpeg';
-    const buffer = Buffer.from(await response.arrayBuffer());
-    return {
-      mimeType: contentType.split(';')[0],
-      data: buffer.toString('base64'),
-    };
-  }
-
-  return {
-    mimeType: 'image/jpeg',
-    data: image,
-  };
-}
-
-async function analyzeImageWithGemini(image: string, promptHint = '') {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY가 설정되어 있지 않습니다.');
-  }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const inlineData = await imageToInlineData(image);
-  const model = process.env.GEMINI_MODEL || process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash';
-
-  const response = await ai.models.generateContent({
-    model,
-    contents: [
-      {
-        inlineData,
-      },
-      {
-        text: [
-          '이 이미지는 인스타그램, 지도, 블로그, 장소 리뷰 캡처일 수 있습니다.',
-          '이미지 안의 텍스트와 시각 정보를 분석해서 실제 방문 장소 후보를 추출하세요.',
-          '한국어 JSON만 반환하세요. 마크다운 코드블록은 쓰지 마세요.',
-          'JSON 필드: name, category, address, latitude, longitude, hours, menu, reviewSummary, screenshotText, confidence',
-          'category는 반드시 카페, 맛집, 숙박, 관광지 중 하나로 쓰세요.',
-          'menu는 [{ "name": "...", "price": "..." }] 배열로 쓰세요.',
-          '좌표를 확실히 모르면 서울/한국 내 합리적인 추정 좌표를 넣고 confidence를 낮추세요.',
-          promptHint ? `추가 힌트: ${promptHint}` : '',
-        ].filter(Boolean).join('\n'),
-      },
-    ],
-    config: {
-      responseMimeType: 'application/json',
-    },
-  });
-
-  const text = response.text || '';
-  const parsed = JSON.parse(text);
-  return normalizePlaceResult(parsed, parsed?.screenshotText || promptHint, 'gemini');
-}
-
+// --- Multi-modal routing & realtime transit (Google Directions + TAGO) ---
 type Coordinate = {
   lat: number;
   lng: number;
@@ -528,74 +522,6 @@ async function fetchTagoBusLocations(cityCode: string, routeId: string) {
   };
 }
 
-app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    app: 'PinSnap Archive',
-    gemini: Boolean(process.env.GEMINI_API_KEY),
-  });
-});
-
-app.post('/api/extract', async (req, res) => {
-  const image = String(req.body?.image || '').trim();
-  const text = String(req.body?.text || req.body?.prompt || '').trim();
-  const promptHint = String(req.body?.promptHint || '').trim();
-
-  if (image) {
-    try {
-      const place = await analyzeImageWithGemini(image, promptHint);
-      res.json(place);
-      return;
-    } catch (error) {
-      console.error('[Gemini image analysis failed]', error);
-      const fallback = inferMockPlace(inferImagePrompt(image, promptHint));
-      res.json({
-        ...fallback,
-        provider: 'mock-fallback',
-        geminiError: error instanceof Error ? error.message : 'Gemini 분석 실패',
-      });
-      return;
-    }
-  }
-
-  if (!text) {
-    res.status(400).json({ error: '분석할 텍스트나 이미지가 필요합니다.' });
-    return;
-  }
-
-  res.json({
-    place: inferMockPlace(text),
-    provider: process.env.GEMINI_API_KEY ? 'mock-ready-for-gemini' : 'mock',
-  });
-});
-
-app.post('/api/ai/itinerary', async (req, res) => {
-  const places = Array.isArray(req.body?.places) ? req.body.places : [];
-
-  if (places.length === 0) {
-    res.status(400).json({
-      error: 'EMPTY_PLACES',
-      message: '일정표를 만들 장소가 필요합니다.',
-    });
-    return;
-  }
-
-  try {
-    const itinerary = await generateItineraryWithGemini(req.body);
-    res.json({
-      provider: 'gemini',
-      itinerary,
-    });
-  } catch (error) {
-    console.error('[Gemini itinerary generation failed]', error);
-    res.json({
-      provider: 'fallback',
-      geminiError: error instanceof Error ? error.message : 'Gemini 일정 생성 실패',
-      itinerary: null,
-    });
-  }
-});
-
 app.post('/api/routes/multi-modal', async (req, res) => {
   const origin = parseCoordinate(req.body?.origin);
   const destination = parseCoordinate(req.body?.destination);
@@ -677,41 +603,29 @@ app.post('/api/transit/realtime', async (req, res) => {
   }
 });
 
-async function start() {
-  if (isProduction) {
-    const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  } else {
+// Start Express server and integrate Vite middleware
+async function startServer() {
+  if (process.env.NODE_ENV !== "production") {
+    // Development Mode
     const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: { server: httpServer },
-      },
-      appType: 'spa',
+      server: { middlewareMode: true },
+      appType: "spa",
     });
     app.use(vite.middlewares);
+    console.log("Vite development middleware attached.");
+  } else {
+    // Production Mode
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+    console.log("Serving static files from dist/ folder.");
   }
 
-  httpServer.on('error', (error: NodeJS.ErrnoException) => {
-    if (error.code === 'EADDRINUSE') {
-      console.error(`[PinSnap Server] ${PORT} 포트가 이미 사용 중입니다.`);
-      console.error('이미 켜진 dev 서버를 닫거나 .env에서 PORT=3001처럼 다른 포트를 지정해 주세요.');
-      process.exit(1);
-    }
-
-    console.error(error);
-    process.exit(1);
-  });
-
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`[PinSnap Server] http://localhost:${PORT}`);
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[Pinsnap Server] Running on http://localhost:${PORT}`);
   });
 }
 
-start().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+startServer();
