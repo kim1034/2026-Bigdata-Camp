@@ -68,18 +68,13 @@ function normalizePlace(raw: any): Place {
     menu: Array.isArray(raw.menu) ? raw.menu : [],
     reviewSummary: String(raw.reviewSummary || ''),
     screenshotText: String(raw.screenshotText || ''),
-    originalImage: raw.originalImage,
     createdAt: String(raw.createdAt || new Date().toISOString()),
   };
 }
 
 function serializePlace(place: Place) {
-  const originalImage =
-    place.originalImage && place.originalImage.length < 650_000 ? place.originalImage : undefined;
-
   return {
     ...place,
-    originalImage,
     updatedAt: new Date().toISOString(),
   };
 }
