@@ -9,6 +9,13 @@ import {
 
 import Map from "./components/Map";
 import { Place, CategoryType, ExtractionResult, PlaceMenu } from "./types";
+import {
+  deletePlaceFromFirestore,
+  isFirebaseDbConfigured,
+  loadPlacesFromFirestore,
+  replacePlacesInFirestore,
+  savePlaceToFirestore,
+} from "./services/firebaseDb";
 
 export default function App() {
   // Load places from localStorage; starts empty on first run
@@ -106,6 +113,45 @@ export default function App() {
   const showAlert = (title: string, message: string) => {
     setCustomAlert({ title, message });
   };
+
+  // Firestore is the primary store when configured; localStorage remains the offline fallback
+  useEffect(() => {
+    let isMounted = true;
+
+    async function hydratePlacesFromFirestore() {
+      if (!isFirebaseDbConfigured()) {
+        return;
+      }
+
+      try {
+        const remotePlaces = await loadPlacesFromFirestore();
+        if (!isMounted) return;
+
+        if (remotePlaces.length > 0) {
+          setPlaces(remotePlaces);
+          return;
+        }
+
+        // Firestore is empty: seed it with locally saved places so existing data isn't lost
+        setPlaces((current) => {
+          if (current.length > 0) {
+            replacePlacesInFirestore(current).catch((error) => {
+              console.warn("Failed to seed Firestore with local places", error);
+            });
+          }
+          return current;
+        });
+      } catch (error) {
+        console.warn("Failed to load places from Firestore", error);
+      }
+    }
+
+    hydratePlacesFromFirestore();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Haversine formula to compute distance in meters between two lat/lngs
   const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
@@ -532,6 +578,9 @@ export default function App() {
     };
 
     setPlaces((prev) => [newPlace, ...prev]);
+    savePlaceToFirestore(newPlace).catch((error) => {
+      console.warn("Failed to save place to Firestore", error);
+    });
     setSelectedPlace(newPlace); // Center map on the newly saved place
     
     // Reset uploader & verification states
@@ -548,6 +597,9 @@ export default function App() {
   // Perform actual deletion of the place after confirmation
   const executeDeletePlace = (id: string) => {
     setPlaces((prev) => prev.filter((p) => p.id !== id));
+    deletePlaceFromFirestore(id).catch((error) => {
+      console.warn("Failed to delete place from Firestore", error);
+    });
     if (selectedPlace?.id === id) {
       setSelectedPlace(null);
     }
@@ -562,6 +614,9 @@ export default function App() {
   // Perform actual clear after confirmation
   const executeResetPresets = () => {
     setPlaces([]);
+    replacePlacesInFirestore([]).catch((error) => {
+      console.warn("Failed to clear Firestore places", error);
+    });
     setSelectedPlace(null);
     setExtractedResult(null);
     localStorage.removeItem("pinsnap_places");

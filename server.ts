@@ -8,7 +8,8 @@ import { createServer as createViteServer } from "vite";
 dotenv.config({ path: [".env.local", ".env"] });
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
 // Set body parser to handle large base64 screenshot images
 app.use(express.json({ limit: "20mb" }));
@@ -36,6 +37,15 @@ if (GEMINI_API_KEY && GEMINI_API_KEY !== "MY_GEMINI_API_KEY") {
   console.log("GEMINI_API_KEY not set. /api/extract will return 503 until it is configured in .env.local.");
 }
 
+// Health check endpoint (used by the mobile app to verify server availability)
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    app: "PinSnap Archive",
+    gemini: Boolean(ai),
+  });
+});
+
 // API Route for screenshot analysis
 app.post("/api/extract", async (req, res) => {
   try {
@@ -54,10 +64,10 @@ app.post("/api/extract", async (req, res) => {
     const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
     const mimeType = image.match(/^data:(image\/\w+);base64,/)?.[1] || "image/png";
 
-    console.log("Calling Gemini 3.5 Flash for screenshot OCR & place extraction...");
+    console.log(`Calling ${GEMINI_MODEL} for screenshot OCR & place extraction...`);
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: GEMINI_MODEL,
       contents: [
         {
           inlineData: {
